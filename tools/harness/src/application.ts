@@ -14,6 +14,8 @@ import type { WorkerRuntime } from './runtime.js';
 import { loadProject, packageRoot } from './profiles.js';
 import { canonical, git, hash, runtimeLocation } from './util.js';
 import { projectSchema } from './schema.js';
+import { OpenCodeRuntime } from './opencode.js';
+import { generatePlan, reviewer } from './llm-roles.js';
 
 export function status(store: Store): unknown {
   return { schemaVersion: 1, mode: store.meta('mode', 'stopped'), release: store.meta('release', null),
@@ -33,11 +35,11 @@ export function releaseIdentity(): { version: string; hash: string } {
   return { version: '0.1.0', hash: hash({ sources, manifest: JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) }) };
 }
 export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime, explicitRuntime?: string) {
-  const { repo, runtime } = runtimeLocation(repoInput, explicitRuntime), ownership = new Ownership(runtime);
+  const { repo, runtime } = runtimeLocation(repoInput, explicitRuntime), policy = loadProject(repo), ownership = new Ownership(runtime);
   let store: Store;
   try { store = new Store(join(runtime, 'state.sqlite'), ownership); } catch (error) { ownership.close(); throw error; }
-  const policy = loadProject(repo), workspaces = new Workspaces(repo, runtime), service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy);
-  const verifier = new Verifier(store, workspaces, runner), integrator = new Integrator(store, workspaces, verifier), supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
+  const workspaces = new Workspaces(repo, runtime), service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy);
+  const verifier = new Verifier(store, workspaces, runner, reviewer(store, service, runtimeAdapter)), integrator = new Integrator(store, workspaces, verifier), supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
   let supervised = false;
   const operate = async (action: string, input: Record<string, unknown> = {}): Promise<unknown> => {
     switch (action) {
@@ -66,6 +68,19 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
         return { approval: store.approve(milestone, committed), limits: committed.defaults, resources: committed.resources };
       }
       case 'answer': return service.answer(input);
+      case 'permission': {
+        const { worker, request, reply } = z.object({ worker: z.string(), request: z.string(), reply: z.enum(['once', 'reject']) }).strict().parse(input);
+        if (!(runtimeAdapter instanceof OpenCodeRuntime)) throw new Error('permission reply requires a live OpenCode runtime');
+        const owner = store.worker(worker); await runtimeAdapter.permission(store.handle(owner), request, reply);
+        store.event('permission', 'operator explicitly answered scoped permission request', owner.task, { worker, request, reply });
+        if (store.task(owner.task).state === 'needs_human') { store.updateTask(owner.task, { state: 'running', blocker: null }); }
+        return { request, reply };
+      }
+      case 'plan': {
+        const { brief, out } = z.object({ brief: z.string(), out: z.string() }).strict().parse(input);
+        if (!service.url) await service.listen();
+        return generatePlan(store, service, workspaces, runtimeAdapter, policy, brief, out);
+      }
       case 'mail': { const { recipient } = z.object({ recipient: z.string().default('operator') }).strict().parse(input); const mail = service.readMail(recipient); service.delivered(recipient, mail.map(m => m.id)); return mail; }
       case 'verify': case 'integrate': {
         if (supervised) throw new Error('automatic pipeline owns verification/integration; stop supervisor before manual maintenance');
@@ -83,12 +98,12 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
   };
   service.onControl = operate;
   return { repo, runtime, ownership, store, policy, service, runner, verifier, integrator, supervisor, operate,
-    async run(maxMs: number) {
+    async run(maxMs: number, exitOnBlocked = false) {
       const release = releaseIdentity(), previous = store.meta<{ hash: string } | null>('release', null);
       if (previous && previous.hash !== release.hash && store.all<WorkerRow>("SELECT * FROM workers WHERE status!='stopped'").length) throw new Error('harness upgrade requires controlled stop of previous revision');
       for (const task of store.tasks().filter(t => t.approval && !['done', 'draft', 'cancelled'].includes(t.state))) if (hash(store.policy(task)) !== hash(policy)) throw new Error('current project policy differs from approval snapshot; restore it or explicitly revise and approve');
       store.setMeta('release', release); store.event('release', 'compiled modules loaded once; source edits are not hot-reloaded', null, release);
-      supervised = true; await service.listen(); await supervisor.run(maxMs);
+      supervised = true; await service.listen(); await supervisor.run(maxMs, exitOnBlocked);
     },
     async close() { await service.close(); store.close(); ownership.close(); },
   };

@@ -9,6 +9,8 @@ import { initProject, loadProject } from './profiles.js';
 import { errorText, runtimeLocation } from './util.js';
 import { openApplication, remoteOperation, status } from './application.js';
 import { demo } from './demo.js';
+import { OpenCodeRuntime } from './opencode.js';
+import { Ownership } from './ownership.js';
 
 interface Options { repo: string; runtime?: string; [key: string]: unknown }
 const print = (data: unknown): void => { console.log(JSON.stringify(data, null, 2)); };
@@ -18,7 +20,7 @@ const call = async (opts: Options, action: string, input: Record<string, unknown
   const location = runtimeLocation(opts.repo, opts.runtime);
   const remote = await remoteOperation(location.runtime, action, input);
   if (remote.connected) { print(remote.output); return; }
-  const app = openApplication(location.repo, new FakeRuntime(), location.runtime);
+  const app = openApplication(location.repo, new OpenCodeRuntime(location.runtime), location.runtime);
   try { print(await app.operate(action, input)); } finally { await app.close(); }
 };
 
@@ -53,8 +55,23 @@ targeted(cli.command('checkpoint').description('Inspect persisted checkpoints an
 targeted(cli.command('backup').description('SQLite online backup, including committed WAL content')).requiredOption('--file <path>', 'new backup destination').action((opts: Options) => call(opts, 'backup', { file: resolve(String(opts.file)) }));
 targeted(cli.command('resolve-action').description('Record operator reconciliation of uncertain external command')).requiredOption('--id <id>', 'action ID').requiredOption('--reason <text>', 'evidence of observed outcome').action((opts: Options) => call(opts, 'resolve-action', { id: opts.id, reason: opts.reason }));
 targeted(cli.command('promote').description('Explicit fast-forward promotion to clean current user branch; no push')).requiredOption('--target <branch>', 'user branch').action((opts: Options) => call(opts, 'promote', { target: opts.target }));
+targeted(cli.command('plan').description('Bounded live read-only planner produces a schema-valid draft; never approves')).requiredOption('--brief <path>', 'brief file').requiredOption('--out <path>', 'new draft YAML destination').action((opts: Options) => call(opts, 'plan', { brief: resolve(String(opts.brief)), out: resolve(String(opts.out)) }));
+targeted(cli.command('permission').description('Operator answers one scoped permission; never automatic, never always')).requiredOption('--worker <id>', 'worker ID').requiredOption('--request <id>', 'permission request ID').requiredOption('--reply <action>', 'once or reject').action((opts: Options) => call(opts, 'permission', { worker: opts.worker, request: opts.request, reply: opts.reply }));
+targeted(cli.command('restore').description('Restore a checked SQLite backup into absent state database; supervisor must be stopped')).requiredOption('--file <path>', 'backup source').action((opts: Options) => {
+  const { runtime } = runtimeLocation(opts.repo, opts.runtime), owner = new Ownership(runtime);
+  try { Store.restore(resolve(String(opts.file)), join(runtime, 'state.sqlite'), owner); print({ restored: true, mode: 'inspect/reconcile before resuming' }); } finally { owner.close(); }
+});
+targeted(cli.command('run').description('Run owned OpenCode supervisor; explicit resume, finite wall-clock cap')).option('--max-ms <number>', 'supervisor wall-clock cap', '3600000').action(async (opts: Options) => {
+  const { runtime } = runtimeLocation(opts.repo, opts.runtime), maximum = Number(opts.maxMs);
+  if (!Number.isSafeInteger(maximum) || maximum < 100 || maximum > 86_400_000) throw new Error('--max-ms must be 100..86400000');
+  const app = openApplication(opts.repo, new OpenCodeRuntime(runtime), runtime);
+  const stop = (): void => { void app.supervisor.control('stop', {}); }; process.on('SIGINT', stop); process.on('SIGTERM', stop);
+  try { if (app.store.meta('mode', 'stopped') !== 'running') throw new Error('use resume explicitly before run; paused work never self-restarts'); print({ runtime, limits: app.policy.defaults, resources: app.policy.resources, maxMs: maximum, mode: 'trusted-local' }); await app.run(maximum); print(status(app.store)); }
+  finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); await app.supervisor.stopWorkers(); await app.close(); }
+});
 targeted(cli.command('demo').description('Run bounded production workflow on a NEW disposable repository')).option('--mode <mode>', 'mock (offline) or live', 'mock').action(async (opts: Options) => {
-  if (opts.mode !== 'mock') throw new Error('live adapter pending Phase C');
-  print(await demo(opts.repo));
+  if (!['mock', 'live'].includes(String(opts.mode))) throw new Error('mode must be mock or live');
+  const report = await demo(opts.repo, opts.mode === 'live' ? 'live' : undefined); print(report);
+  if ((report as { result: string }).result !== 'passed') process.exitCode = 2;
 });
 try { await cli.parseAsync(); } catch (error) { console.error(JSON.stringify({ error: errorText(error) })); process.exitCode = 1; }

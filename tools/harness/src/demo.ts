@@ -8,9 +8,11 @@ import type { WorkerRuntime } from './runtime.js';
 import { openApplication, status } from './application.js';
 import { git } from './util.js';
 import type { MailRow } from './store.js';
+import { OpenCodeRuntime } from './opencode.js';
+import { runtimeLocation } from './util.js';
 
 /** A disposable, bounded exercise. This never points workers at the harness's running source. */
-export async function demo(repoInput: string, runtimeAdapter?: WorkerRuntime): Promise<unknown> {
+export async function demo(repoInput: string, runtimeAdapter?: WorkerRuntime | 'live'): Promise<unknown> {
   const repo = resolve(repoInput);
   if (existsSync(repo) && readdirSync(repo).length) throw new Error('demo requires an absent or empty disposable directory');
   initProject(repo, 'generic-command');
@@ -35,7 +37,7 @@ export async function demo(repoInput: string, runtimeAdapter?: WorkerRuntime): P
   const plan = planSchema.parse({ schemaVersion: 1, milestone: 'smoke', baseCommit, tasks });
   mkdirSync(join(repo, '.harness/plans')); const file = join(repo, '.harness/plans/smoke.yaml'); writeFileSync(file, stringify(plan));
   git(repo, ['add', '.harness/plans/smoke.yaml']); git(repo, ['commit', '-m', 'Record bounded smoke milestone']);
-  const fake = new FakeRuntime(), adapter = runtimeAdapter ?? fake;
+  const fake = new FakeRuntime(), adapter = runtimeAdapter === 'live' ? new OpenCodeRuntime(runtimeLocation(repo).runtime) : runtimeAdapter ?? fake;
   const app = openApplication(repo, adapter);
   if (!runtimeAdapter) fake.onDispatch = async (input) => {
     const worker = app.store.worker(input.id), task = app.store.task(worker.task), handle = app.store.handle(worker);
@@ -54,7 +56,7 @@ export async function demo(repoInput: string, runtimeAdapter?: WorkerRuntime): P
   };
   try {
     await app.operate('import', { file }); await app.operate('approve', { milestone: 'smoke' });
-    app.store.setMeta('mode', 'running'); await app.run(runtimeAdapter ? 240_000 : 20_000);
+    app.store.setMeta('mode', 'running'); await app.run(runtimeAdapter ? 240_000 : 20_000, true);
     const mail = app.store.all<MailRow>('SELECT * FROM messages ORDER BY created');
     const passed = app.store.tasks().every(t => t.state === 'done') && mail.some(m => m.type === 'question' && m.acknowledged) && mail.some(m => m.type === 'answer' && m.acknowledged) && app.store.task('alpha').prompts >= 2;
     const report = { mode: runtimeAdapter ? 'live' : 'mock', result: passed ? 'passed' : 'unverified', ownedProcessesStopped: app.store.all("SELECT * FROM workers WHERE status!='stopped'").length === 0, runtime: app.runtime, status: status(app.store) };

@@ -17,7 +17,7 @@ Inspected 2026-09-28 on the actual bootstrap machine. No global configuration, G
 | Rust | Default 1.92.0; stable **1.95.0** already installed and selected explicitly for template |
 | Bevy | **0.19.1**, non-yanked; crate metadata MSRV **1.95.0** |
 | Desktop | cc/c++/pkg-config present; X11 1.8.12, Xi 1.8.2, Xrandr 1.5.4, Xcursor 1.2.3, Xinerama 1.1.4, ALSA 1.2.14, udev 257, Wayland 1.24.0, xkbcommon 1.7.0. Vulkan pkg-config entry missing. DISPLAY/WAYLAND_DISPLAY set. Actual GPU/render test pending. |
-| Models/credentials | No `model` or agent limit in effective global config. Existing credential entries: anthropic/openai. Server reports connected anthropic/opencode/openai. No external plugins/MCP configured. Default selection must be resolved without a provider fallback. Authentication presence is not proof a model call works. |
+| Models/credentials | No `model` or agent limit in effective global config. Existing credential entries: anthropic/openai. Server reports connected anthropic/opencode/openai. No external plugins/MCP configured. Existing recent model `openai/gpt-6-astra` resolved from the server-reported state directory, validated and used successfully. See live-smoke.md. |
 
 Activate local Node for this checkout:
 
@@ -51,6 +51,6 @@ Actual result: owned loopback server reported 1.18.33 and correct directory; una
 
 ## Remaining prerequisites
 
-- Verify selected effective model before live spend; no fallback provider is authorized.
+- Live two-worker mail/continuation/verification passed; no fallback provider used. Planner/reviewer live validation remains separate.
 - Desktop rendering and screenshots remain unverified until an actual finite graphical run succeeds.
 - CI workflow execution is not local evidence and requires an operator's separate CI environment.

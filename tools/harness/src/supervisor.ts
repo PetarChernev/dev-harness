@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { WorkerRuntime, WorkerHandle } from './runtime.js';
+import { WorkerStartError } from './runtime.js';
 import type { DispatchRow, Store, TaskRow, WorkerRow, ActionRow } from './store.js';
 import { transition } from './store.js';
 import type { Project } from './schema.js';
@@ -162,7 +163,10 @@ export class Supervisor {
       if (readOnly) this.store.run('INSERT INTO actions VALUES (?,?,?,?,?,?,?)', `responder_${workerId}`, task.id, 'responder', 'running', canonical({ messages: this.service.readMail(task.id).map(m => m.id) }), null, now);
       return this.store.worker(workerId);
     } catch (error) {
-      this.uncertain(this.store.worker(workerId), `start failed; reconcile process metadata before retry: ${redact(errorText(error), this.service.secrets)}`);
+      if (error instanceof WorkerStartError && error.stopped) {
+        this.store.run("UPDATE workers SET status='stopped' WHERE id=?", workerId);
+        if (!readOnly) transition(this.store, task.id, 'needs_human', `worker startup blocked (owned process stopped): ${redact(error.message, this.service.secrets)}`);
+      } else this.uncertain(this.store.worker(workerId), `start failed; reconcile process metadata before retry: ${redact(errorText(error), this.service.secrets)}`);
       return null;
     }
   }
@@ -213,7 +217,7 @@ export class Supervisor {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      for (const worker of this.store.all<WorkerRow>("SELECT * FROM workers WHERE status='active'")) {
+      for (const worker of this.store.all<WorkerRow>("SELECT * FROM workers WHERE status='active' AND readOnly IN (0,1)")) {
         try { await this.reconcile(worker); } catch (error) { this.uncertain(worker, `reconciliation failed: ${redact(errorText(error), this.service.secrets)}`); }
       }
       this.cycles();
@@ -284,13 +288,14 @@ export class Supervisor {
     }
     await Promise.all([...this.verification.values(), ...(this.integrating ? [this.integrating] : [])]);
   }
-  async run(maxMs = 3_600_000): Promise<void> {
+  async run(maxMs = 3_600_000, exitOnBlocked = false): Promise<void> {
     const end = Date.now() + maxMs;
     try {
       await this.recover();
       while (Date.now() < end && this.store.meta('mode', 'stopped') !== 'stopped') {
         await this.tick();
         const tasks = this.store.tasks();
+        if (exitOnBlocked && tasks.every(t => ['needs_human', 'failed', 'done', 'cancelled'].includes(t.state)) && !this.verification.size && !this.integrating) break;
         if (tasks.every(t => ['draft', 'done', 'cancelled', 'failed'].includes(t.state)) && !this.verification.size && !this.integrating) { this.store.event('milestone', 'approved work exhausted; no new scope invented'); break; }
         if (this.store.meta('mode', '') === 'draining' && this.store.all<DispatchRow>("SELECT * FROM dispatches WHERE status IN ('intent','accepted','uncertain')").length === 0 && !this.verification.size && !this.integrating) break;
         await sleep(this.policy.pollMs);

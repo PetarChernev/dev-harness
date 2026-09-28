@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "bash": { "*": "ask", "git push*": "deny" }
+  },
+  "command": {
+    "harness-status": {
+      "description": "Inspect authoritative SQLite harness status",
+      "template": "Run npm run harness -- status --repo . and summarize blockers, evidence and next actions. Do not create a competing task list."
+    },
+    "harness-plan": {
+      "description": "Generate a bounded draft plan from a brief path and output path",
+      "template": "Use npm run harness -- plan --repo . --brief <brief-path> --out <new-plan-path> for these arguments: $ARGUMENTS. Inspect the draft for scope and limits. Approval is an explicit operator action."
+    },
+    "bootstrap-resume": {
+      "description": "Resume bootstrap from durable handoff and real runtime status",
+      "template": "Read docs/bootstrap/specification.md, docs/bootstrap/progress.md, docs/bootstrap/preflight.md and docs/runbook.md. Run npm run harness -- status --repo .; inspect git status and the latest verification evidence. Continue the next concrete authorized bootstrap action and update the handoff. Do not use an unfinished harness to supervise its own running core."
+    }
+  }
+}

@@ -14,6 +14,9 @@ export interface WorkerRuntime {
   cancel(handle: WorkerHandle): Promise<'stopped' | 'uncertain'>;
   health(): Promise<{ healthy: boolean; detail: string }>;
 }
+export class WorkerStartError extends Error {
+  constructor(message: string, readonly stopped: boolean) { super(message); }
+}
 
 /** Deterministic adapter; all state/mail/Git/verification is still production code. */
 export class FakeRuntime implements WorkerRuntime {

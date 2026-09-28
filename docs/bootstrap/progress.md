@@ -6,7 +6,7 @@ Authority: [saved request](specification.md). Runtime task state will live in SQ
 |---|---|---|
 | A | Environment/API inspected; schemas, CLI, fake adapter executable | Complete: strict TS build and 2 initial offline tests pass; `doctor` executes; installed SDK/server no-spend probe passed. See preflight.md. |
 | B | Real persistence, scheduler/mail/recovery, Git verification/integration; offline acceptance suite | Complete initial increment: 13 offline tests pass using real Git, SQLite and subprocesses; production mock demo passes with two-way acknowledged mail, alpha continuation, independent and combined checks, serialized commits. |
-| C | SDK adapter + scoped API/tools; bounded live demo with truthful result | Pending |
+| C | SDK adapter + scoped API/tools; bounded live demo with truthful result | Implemented; real two-session smoke passed. See live-smoke.md for exact commits, mail, budgets, usage and cleanup. |
 | D | Pack/install proof, neutral Rust/Bevy starter, checks, runbook, audit | Pending |
 
 ## Blockers
@@ -16,7 +16,7 @@ Authority: [saved request](specification.md). Runtime task state will live in SQ
 
 ## Next concrete action
 
-Implement Phase C SDK runtime and protected custom tools, then run the bounded live demo. Expand CLI/packaging and acceptance coverage in Phase D. Activate local Node PATH as documented in preflight.md.
+Phase D: package/install into another repository, add regression coverage for recovery and CLI, generate the Rust/Bevy template/application, run headless/desktop gates, and finish runbook/audit. Activate local Node PATH as documented in preflight.md.
 
 ## Evidence
 

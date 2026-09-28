@@ -1,0 +1,19 @@
+import { tool } from '@opencode-ai/plugin';
+import { readFile } from 'node:fs/promises';
+
+async function call(action: string, input: unknown, session: string): Promise<string> {
+  const token = process.env.HARNESS_WORKER_TOKEN, endpoint = process.env.HARNESS_ENDPOINT_FILE;
+  if (!token || !endpoint) throw new Error('This tool is available only in an owned supervised worker session. Use the harness CLI for operator actions.');
+  const { url } = JSON.parse(await readFile(endpoint, 'utf8'));
+  if (typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) throw new Error('invalid local control endpoint');
+  const result = await fetch(`${url}/worker/${action}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-harness-session': session, 'content-type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(10_000) });
+  const body = await result.text(); if (!result.ok) throw new Error(body); return body;
+}
+export const context = tool({ description: 'Read authoritative task revision, limits, evidence, roster and pending mail.', args: {}, execute: (args, context) => call('context', args, context.sessionID) });
+export const mail_send = tool({ description: 'Send addressed task-scoped durable mail. Use a stable ID across retries. Sender is derived from session authorization. Conversations do not change specifications.',
+  args: { id: tool.schema.string(), thread: tool.schema.string(), to: tool.schema.string(), task: tool.schema.string(), type: tool.schema.enum(['question', 'answer', 'proposal', 'blocker', 'evidence']), body: tool.schema.string(), replyTo: tool.schema.string().optional() }, execute: (args, context) => call('mail-send', args, context.sessionID) });
+export const mail_read = tool({ description: 'Read unacknowledged addressed mail. Delivery is distinct from acknowledgement.', args: {}, execute: (args, context) => call('mail-read', args, context.sessionID) });
+export const mail_ack = tool({ description: 'Acknowledge a message ID after processing once.', args: { id: tool.schema.string() }, execute: (args, context) => call('mail-ack', args, context.sessionID) });
+export const checkpoint = tool({ description: 'Persist a checkpoint with a stable ID. Narration is not proof of progress or completion.', args: { id: tool.schema.string(), summary: tool.schema.string(), artifacts: tool.schema.array(tool.schema.string()).optional() }, execute: (args, context) => call('checkpoint', args, context.sessionID) });
+export const block = tool({ description: 'Declare a blocker. Use waitingFor for another task or human=true for an operator decision. Then end the turn; the supervisor will deliver replies at a safe boundary.', args: { reason: tool.schema.string(), waitingFor: tool.schema.string().optional(), human: tool.schema.boolean().optional() }, execute: (args, context) => call('block', args, context.sessionID) });
+export const submit = tool({ description: 'Submit a clean immutable Git commit for this task revision, declared paths, evidence and limitations. Does not mark done. Independent verification/integration follows.', args: { revision: tool.schema.number().int(), commit: tool.schema.string(), changes: tool.schema.array(tool.schema.string()), evidence: tool.schema.array(tool.schema.string()), limitations: tool.schema.array(tool.schema.string()) }, execute: (args, context) => call('submit', args, context.sessionID) });
