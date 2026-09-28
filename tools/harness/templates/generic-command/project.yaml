@@ -1,0 +1,45 @@
+schemaVersion: 1
+name: neutral-project
+profile: generic-command
+roles:
+  planner:
+    readOnly: true
+    instructions: Propose bounded schema-valid draft tasks from the supplied brief. Do not approve or invent new product scope.
+  implementer:
+    instructions: Implement only the approved revision within its edit scope. Inspect the current diff, exchange addressed harness mail, run relevant checks, and submit immutable evidence. Never spawn unmanaged agents.
+  researcher:
+    instructions: Produce a versioned report and reproducible experiment with limitations. Use harness mail for questions. Evidence is required even when application code is unchanged.
+  reviewer:
+    readOnly: true
+    instructions: Independently inspect the candidate and acceptance criteria. Report concrete findings as structured JSON. Do not edit or approve implementation.
+resources:
+  implementations: 3
+  verification: 1
+  graphical: 1
+  buildJobs: 2
+defaults:
+  attempts: 3
+  prompts: 12
+  steps: 12
+  elapsedMs: 1800000
+  noProgress: 3
+  providerRetries: 2
+  sessionPrompts: 8
+  tokens: 200000
+  costUsd: 5
+commands:
+  check:
+    executable: node
+    args: ['-e', 'console.log("Replace this example check with the project acceptance command before approving work.")']
+    timeoutMs: 30000
+    buildJobs: 1
+integration:
+  branch: harness/integration
+  checks: [check]
+protectedPaths: ['tools/harness/**', '.harness/**', '.opencode/**', opencode.json, 'tests/**']
+dependencyPaths: ['**/package.json', '**/package-lock.json', '**/Cargo.toml', '**/Cargo.lock']
+sharedLocks:
+  manifests: ['**/package.json', '**/package-lock.json', '**/Cargo.toml', '**/Cargo.lock']
+leaseMs: 30000
+pollMs: 1000
+trustedLocal: true

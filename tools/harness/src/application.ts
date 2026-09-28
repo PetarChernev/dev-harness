@@ -1,0 +1,108 @@
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { parse } from 'yaml';
+import { Ownership } from './ownership.js';
+import { Store } from './store.js';
+import type { ActionRow, WorkerRow } from './store.js';
+import { Workspaces } from './workspace.js';
+import { StateService } from './service.js';
+import { CommandRunner } from './commands.js';
+import { Verifier, Integrator } from './verification.js';
+import { Supervisor } from './supervisor.js';
+import type { WorkerRuntime } from './runtime.js';
+import { loadProject, packageRoot } from './profiles.js';
+import { canonical, git, hash, runtimeLocation } from './util.js';
+import { projectSchema } from './schema.js';
+
+export function status(store: Store): unknown {
+  return { schemaVersion: 1, mode: store.meta('mode', 'stopped'), release: store.meta('release', null),
+    tasks: store.tasks().map(task => ({ ...task, nextAction: ({ draft: 'review and approve milestone', ready: 'await satisfied dependencies/capacity or resume', running: 'reconcile session and continue useful work', submitted: 'stop writer and verify independently', verifying: 'await approved command evidence', integration: 'rerun combined checks and serialize advance', done: 'review integrated evidence; explicit promotion', blocked: 'await addressed reply', needs_human: 'operator must resolve blocker', failed: 'inspect evidence; bounded retry or new revision', cancelled: 'preserved; explicit retry only' } as const)[task.state],
+      session: task.worker ? store.worker(task.worker).session : null,
+      evidence: store.all('SELECT id,kind,created,valid FROM evidence WHERE task=? ORDER BY created', task.id),
+      consumption: { prompts: task.prompts, tokens: task.tokens ?? 'unknown', costUsd: task.cost ?? 'unknown' },
+    })),
+    pendingMail: store.all('SELECT id,thread,sender,recipient,task,type,delivered,acknowledged FROM messages WHERE acknowledged IS NULL'),
+    unresolvedActions: store.all("SELECT * FROM actions WHERE status IN ('intent','running','uncertain')"),
+    integrations: store.all('SELECT * FROM integrations ORDER BY created'),
+  };
+}
+export function releaseIdentity(): { version: string; hash: string } {
+  const directory = join(packageRoot, 'dist');
+  const sources = readdirSync(directory).filter(p => p.endsWith('.js')).sort().map(p => [p, readFileSync(join(directory, p), 'utf8')]);
+  return { version: '0.1.0', hash: hash({ sources, manifest: JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) }) };
+}
+export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime, explicitRuntime?: string) {
+  const { repo, runtime } = runtimeLocation(repoInput, explicitRuntime), ownership = new Ownership(runtime);
+  let store: Store;
+  try { store = new Store(join(runtime, 'state.sqlite'), ownership); } catch (error) { ownership.close(); throw error; }
+  const policy = loadProject(repo), workspaces = new Workspaces(repo, runtime), service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy);
+  const verifier = new Verifier(store, workspaces, runner), integrator = new Integrator(store, workspaces, verifier), supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
+  let supervised = false;
+  const operate = async (action: string, input: Record<string, unknown> = {}): Promise<unknown> => {
+    switch (action) {
+      case 'status': return status(store);
+      case 'logs': return store.all('SELECT * FROM events ORDER BY seq DESC LIMIT 200');
+      case 'import': {
+        const { file } = z.object({ file: z.string() }).strict().parse(input);
+        const text = readFileSync(file, 'utf8'), plan = store.importPlan(parse(text));
+        store.setMeta(`plan-source:${plan.milestone}`, { file, hash: hash(plan) }); return plan;
+      }
+      case 'approve': {
+        const { milestone } = z.object({ milestone: z.string() }).strict().parse(input);
+        const committed = projectSchema.parse(parse(git(repo, ['show', 'HEAD:.harness/project.yaml'])));
+        if (hash(committed) !== hash(loadProject(repo))) throw new Error('commit project policy before approval');
+        const source = store.meta<{ file: string; hash: string } | null>(`plan-source:${milestone}`, null);
+        if (!source) throw new Error('import a versioned plan before approval');
+        const relative = source.file.startsWith(repo + '/') ? source.file.slice(repo.length + 1) : source.file;
+        if (relative.startsWith('/') || relative.includes('..')) throw new Error('plan must be versioned in target repository');
+        const committedPlan = parse(git(repo, ['show', `HEAD:${relative}`]));
+        const { planSchema } = await import('./schema.js');
+        if (hash(planSchema.parse(committedPlan)) !== source.hash) throw new Error('commit exact imported plan before approval');
+        for (const task of store.tasks().filter(t => t.milestone === milestone)) {
+          workspaces.commit(task.baseCommit);
+          const decision = store.spec(task).decisionRecord; if (decision) git(repo, ['show', `${task.baseCommit}:${decision}`]);
+        }
+        return { approval: store.approve(milestone, committed), limits: committed.defaults, resources: committed.resources };
+      }
+      case 'answer': return service.answer(input);
+      case 'mail': { const { recipient } = z.object({ recipient: z.string().default('operator') }).strict().parse(input); const mail = service.readMail(recipient); service.delivered(recipient, mail.map(m => m.id)); return mail; }
+      case 'verify': case 'integrate': {
+        if (supervised) throw new Error('automatic pipeline owns verification/integration; stop supervisor before manual maintenance');
+        const { task } = z.object({ task: z.string() }).strict().parse(input); return { passed: await (action === 'verify' ? verifier.verify(task) : integrator.integrate(task)) };
+      }
+      case 'promote': { if (supervised) throw new Error('stop before promotion'); const { target } = z.object({ target: z.string() }).strict().parse(input); workspaces.promote(policy, target); store.event('promotion', 'operator explicitly promoted verified branch', null, { target }); return { target }; }
+      case 'backup': { const { file } = z.object({ file: z.string() }).strict().parse(input); await store.backup(file); return { backup: file }; }
+      case 'resolve-action': {
+        const { id, reason } = z.object({ id: z.string(), reason: z.string().min(1) }).strict().parse(input);
+        const action = store.get<ActionRow>('SELECT * FROM actions WHERE id=?', id); if (!action || action.status !== 'uncertain') throw new Error('action not uncertain');
+        store.run("UPDATE actions SET status='reconciled',result=? WHERE id=?", canonical({ operatorReason: reason }), id); store.event('reconciliation', reason, action.task, { id }); return { reconciled: id };
+      }
+      default: return supervisor.control(action, input);
+    }
+  };
+  service.onControl = operate;
+  return { repo, runtime, ownership, store, policy, service, runner, verifier, integrator, supervisor, operate,
+    async run(maxMs: number) {
+      const release = releaseIdentity(), previous = store.meta<{ hash: string } | null>('release', null);
+      if (previous && previous.hash !== release.hash && store.all<WorkerRow>("SELECT * FROM workers WHERE status!='stopped'").length) throw new Error('harness upgrade requires controlled stop of previous revision');
+      for (const task of store.tasks().filter(t => t.approval && !['done', 'draft', 'cancelled'].includes(t.state))) if (hash(store.policy(task)) !== hash(policy)) throw new Error('current project policy differs from approval snapshot; restore it or explicitly revise and approve');
+      store.setMeta('release', release); store.event('release', 'compiled modules loaded once; source edits are not hot-reloaded', null, release);
+      supervised = true; await service.listen(); await supervisor.run(maxMs);
+    },
+    async close() { await service.close(); store.close(); ownership.close(); },
+  };
+}
+
+export async function remoteOperation(runtime: string, action: string, input: unknown): Promise<{ connected: boolean; output?: unknown }> {
+  if (!existsSync(join(runtime, 'endpoint.json'))) return { connected: false };
+  const { url } = z.object({ url: z.string().regex(/^http:\/\/127\.0\.0\.1:\d+$/), pid: z.number() }).parse(JSON.parse(readFileSync(join(runtime, 'endpoint.json'), 'utf8')));
+  const { token } = z.object({ token: z.string() }).parse(JSON.parse(readFileSync(join(runtime, 'operator.json'), 'utf8')));
+  let response: Response;
+  try { response = await fetch(`${url}/operator/${action}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000) }); }
+  catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') throw new Error('operator request outcome uncertain; inspect status before retrying');
+    return { connected: false };
+  }
+  const output: unknown = await response.json(); if (!response.ok) throw new Error(JSON.stringify(output)); return { connected: true, output };
+}
