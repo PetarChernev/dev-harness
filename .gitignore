@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.local/
+target/
+artifacts/
+*.tgz
+*.sqlite*
+.harness/runtime/
+.opencode/node_modules/
+.opencode/package.json
+.opencode/bun.lock
+.opencode/bun.lockb
+.env
+.env.*
+!.env.example
