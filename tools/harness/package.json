@@ -6,13 +6,14 @@
   "license": "UNLICENSED",
   "bin": { "harness": "dist/cli.js" },
   "exports": { ".": "./dist/index.js" },
-  "files": ["dist", "templates", "schemas", "README.md"],
+  "files": ["dist", "templates", "schemas", "README.md", "npm-shrinkwrap.json"],
   "engines": { "node": "24.21.0" },
   "packageManager": "npm@11.19.0",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node dist/generate-schemas.js",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
+    "test:package": "node scripts/package-proof.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {

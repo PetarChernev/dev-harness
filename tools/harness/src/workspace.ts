@@ -1,15 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { sha } from './schema.js';
+import { reservedPaths, sha } from './schema.js';
 import type { Project, Submission, TaskSpec } from './schema.js';
 import { git, hash, matches, safePath, uid } from './util.js';
 
 export class Workspaces {
   constructor(readonly repo: string, readonly runtime: string) { mkdirSync(join(runtime, 'worktrees'), { recursive: true }); }
   commit(ref: string): string { return sha.parse(git(this.repo, ['rev-parse', '--verify', `${ref}^{commit}`])); }
-  create(task: string, base: string, attempt: number): string {
+  ancestor(parent: string, child: string): void { git(this.repo, ['merge-base', '--is-ancestor', sha.parse(parent), sha.parse(child)]); }
+  create(task: string, base: string, attempt: number, revision = 1): string {
     sha.parse(base);
-    const path = join(this.runtime, 'worktrees', `${task}-${attempt}`);
+    const path = join(this.runtime, 'worktrees', `${task}-r${revision}-${attempt}`);
     if (existsSync(path)) {
       if (git(path, ['rev-parse', '--show-toplevel']) !== path) throw new Error('workspace collision');
       return path;
@@ -29,7 +30,7 @@ export class Workspaces {
   fingerprint(workspace: string): string {
     const untracked = git(workspace, ['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
     return hash({ head: git(workspace, ['rev-parse', 'HEAD']), diff: git(workspace, ['diff', 'HEAD', '--binary']), untracked: untracked.map(p => {
-      try { const path = safePath(workspace, p); return [p, statSync(path).size <= 10_000_000 ? hash(readFileSync(path)) : statSync(path).mtimeMs]; } catch { return [p, 'unsafe']; }
+      try { const path = safePath(workspace, p); return [p, statSync(path).size <= 10_000_000 ? hash(readFileSync(path)) : { largeArtifactRequiresCheckEvidence: statSync(path).size }]; } catch { return [p, 'unsafe']; }
     }) });
   }
   validate(spec: TaskSpec, policy: Project, workspace: string, base: string, submission: Submission): string[] {
@@ -43,7 +44,7 @@ export class Workspaces {
     if (hash([...paths].sort()) !== hash([...new Set(submission.changes)].sort())) throw new Error('declared changes do not match actual paths');
     for (const path of paths) {
       if (!spec.editablePaths.some(p => matches(path, p))) throw new Error(`unexpected changed path ${path}`);
-      if (policy.protectedPaths.some(p => matches(path, p)) && spec.kind !== 'maintenance') throw new Error(`protected policy/path ${path}`);
+      if ([...reservedPaths, ...policy.protectedPaths].some(p => matches(path, p)) && spec.kind !== 'maintenance') throw new Error(`protected policy/path ${path}`);
       if (policy.dependencyPaths.some(p => matches(path, p)) && !spec.allowDependencies) throw new Error(`dependency change not approved: ${path}`);
       for (const [key, patterns] of Object.entries(policy.sharedLocks)) if (patterns.some(p => matches(path, p)) && !spec.locks.includes(key)) throw new Error(`unapproved shared contract ${key}: ${path}`);
       safePath(workspace, path, true);
@@ -61,7 +62,7 @@ export class Workspaces {
   }
   integrationHead(policy: Project, base: string): string {
     const ref = `refs/heads/${policy.integration.branch}`;
-    try { return this.commit(ref); } catch { git(this.repo, ['update-ref', ref, sha.parse(base), '0'.repeat(40)]); return base; }
+    try { return this.commit(ref); } catch { git(this.repo, ['update-ref', ref, sha.parse(base), '0'.repeat(base.length)]); return base; }
   }
   advance(policy: Project, previous: string, candidate: string): void {
     const ref = `refs/heads/${policy.integration.branch}`;

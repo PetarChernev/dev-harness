@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/project_core", "crates/headless", "crates/desktop"]
+default-members = ["crates/project_core", "crates/headless"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+
+[workspace.dependencies]
+project_core = { path = "crates/project_core" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+sha2 = "=0.10.9"
+bevy = { version = "=0.19.1", default-features = false, features = [
+  "std", "async_executor", "bevy_asset", "bevy_log", "bevy_color",
+  "bevy_camera", "bevy_core_pipeline", "bevy_mesh", "bevy_render", "bevy_shader",
+  "bevy_sprite", "bevy_sprite_render", "bevy_window", "bevy_winit",
+  "multi_threaded", "png", "x11"
+] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+debug = 1

@@ -19,3 +19,15 @@ Generic commands require no Rust. Rust/Bevy is the first template, with headless
 ## Approval records
 
 Material task/interface/policy changes need a versioned proposal and new milestone approval. Approval records are appended here or in a dedicated versioned decision file and imported with the revision. Runtime messages alone never amend approved criteria.
+
+## ADR-005 — Portable lock and build identity (accepted)
+
+Ship npm-shrinkwrap.json in the tarball to pin transitive dependencies. The build records source Git revision/dirty state, Node version and dependency-lock digest; runtime records the compiled module/content identity. npm can consume the installed shrinkwrap, so runtime uses the retained build digest when the file is absent. Tool source is snapshotted at runtime construction and its plugin import is resolved against the installed package, including hoisted layouts.
+
+## ADR-006 — Generic command resource accounting (accepted)
+
+Approved worker checks and independent/combined verification share command-level build/graphical capacity. Stable worker request IDs deduplicate polling/retries. Language-specific environment settings live in profile `executionEnv` with explicit generic placeholders; Cargo is not scheduler logic. A launcher hook preserves executable/argument boundaries but does not supply isolation. Permissions deny direct supervised compiler/agent-tree commands; arbitrary operator-approved host commands are outside hard OS accounting guarantees.
+
+## ADR-007 — Neutral starter and rendering gate (accepted)
+
+Pure Rust project_core uses seeded integer motion and explicit ticks. Desktop and headless call the same core. Default Cargo members exclude desktop. Bevy/Rust are pinned at 0.19.1/1.95.0; default features are disabled, no audio/assets/nightly optimizations are selected. Baseline replay tests and sample inputs are protected policy material. Finite desktop smoke uses no-VSync to avoid local compositor throttling, preserves a screenshot, and compares its core digest with headless output.

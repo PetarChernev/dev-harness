@@ -16,10 +16,12 @@ export class Supervisor {
   private readonly verification = new Map<string, Promise<void>>();
   private integrating: Promise<void> | null = null;
   private ticking = false;
+  private deadline = Number.POSITIVE_INFINITY;
   constructor(readonly store: Store, readonly service: StateService, readonly workspaces: Workspaces,
     readonly runtime: WorkerRuntime, readonly policy: Project, readonly verifier: Verifier, readonly integrator: Integrator) {}
 
   async recover(): Promise<void> {
+    this.store.run("UPDATE actions SET status='cancelled' WHERE kind='command' AND status='queued'");
     for (const action of this.store.all<ActionRow>("SELECT * FROM actions WHERE status IN ('intent','running') AND kind='command'")) {
       const data = JSON.parse(action.data) as { process?: { pid: number; start: string | null } };
       if (data.process && processState(data.process) === 'alive') {
@@ -30,7 +32,12 @@ export class Supervisor {
       if (!['done', 'cancelled', 'needs_human'].includes(task.state)) transition(this.store, task.id, 'needs_human', `external action ${action.id} interrupted; inspect artifacts before explicit reconciliation`);
     }
     for (const worker of this.store.all<WorkerRow>("SELECT * FROM workers WHERE status!='stopped'")) {
-      if (!worker.handle) { this.uncertain(worker, 'worker launch outcome uncertain; inspect owned process record'); continue; }
+      if (!worker.handle) {
+        const launch = await this.runtime.reconcileStart?.(worker.id);
+        if (launch?.handle) { worker.handle = canonical(launch.handle); worker.session = launch.handle.session; this.store.run('UPDATE workers SET handle=?,session=?,status=? WHERE id=?', worker.handle, worker.session, launch.state === 'owned' ? 'active' : launch.state, worker.id); }
+        else if (launch?.state === 'stopped') { this.store.run("UPDATE workers SET status='stopped' WHERE id=?", worker.id); const task = this.store.task(worker.task); if (task.state === 'running') { transition(this.store, task.id, 'ready', 'interrupted launch process confirmed stopped before dispatch'); this.store.updateTask(task.id, { worker: null }); } continue; }
+        else { this.uncertain(worker, 'worker launch outcome uncertain; inspect owned process record'); continue; }
+      }
       const ownership = await this.runtime.resume(this.store.handle(worker));
       if (ownership === 'uncertain') this.uncertain(worker, 'worker process ownership uncertain; no reassignment');
       else if (ownership === 'stopped') {
@@ -62,15 +69,18 @@ export class Supervisor {
   }
   private async retire(worker: WorkerRow, reason: string): Promise<boolean> {
     if (worker.status === 'stopped') return true;
+    if (!worker.readOnly) this.verifier.runner.cancelTask(worker.task);
     if (!worker.handle || await this.runtime.cancel(this.store.handle(worker)) !== 'stopped') { this.uncertain(worker, `cannot confirm worker stopped: ${reason}`); return false; }
     this.store.run("UPDATE workers SET status='stopped' WHERE id=?", worker.id);
-    this.store.run('UPDATE attempts SET ended=?,reason=? WHERE task=? AND number=?', Date.now(), reason, worker.task, worker.attempt);
+    this.store.run("UPDATE dispatches SET status='cancelled' WHERE worker=? AND status IN ('intent','accepted','uncertain')", worker.id);
+    if (!worker.readOnly) this.store.run('UPDATE attempts SET ended=?,reason=? WHERE task=? AND revision=? AND number=?', Date.now(), reason, worker.task, worker.revision, worker.attempt);
     this.store.event('worker-stop', reason, worker.task, { worker: worker.id, session: worker.session });
     return true;
   }
   private async reconcile(worker: WorkerRow): Promise<void> {
     if (!worker.handle || worker.status !== 'active') return;
     const handle = this.store.handle(worker), task = this.store.task(worker.task), spec = this.store.spec(task);
+    if (worker.readOnly && Date.now() - worker.created > Math.min(spec.limits.elapsedMs, 60_000)) { await this.retire(worker, 'late responder wall-clock budget exhausted'); return; }
     if (!this.observed.has(worker.id)) {
       this.observed.add(worker.id);
       void this.runtime.observe(handle, () => { /* events are hints; the bounded poll reconciles durable status */ }, this.events.signal).catch(() => this.store.event('events', 'event stream lost; polling history remains authoritative', task.id));
@@ -78,19 +88,26 @@ export class Supervisor {
     if (task.leaseUntil && task.leaseUntil < Date.now()) {
       const owned = await this.runtime.resume(handle);
       if (owned !== 'owned') { this.uncertain(worker, `expired lease reconciliation: ${owned}`); return; }
+      this.store.updateTask(task.id, { leaseUntil: Date.now() + this.policy.leaseMs });
       this.store.event('lease', 'expired lease reconciled to same live owner; no second writer', task.id);
     }
+    if (task.started && Date.now() - task.started > spec.limits.elapsedMs && task.state !== 'done') {
+      await this.retire(worker, 'elapsed budget exhausted');
+      if (this.store.task(task.id).state !== 'needs_human') transition(this.store, task.id, 'needs_human', 'elapsed budget exhausted');
+      else this.store.updateTask(task.id, { blocker: 'elapsed budget exhausted; owned worker stopped or awaiting ownership reconciliation' });
+      return;
+    }
     const status = await this.runtime.status(handle);
+    if (status.retryAttempt !== undefined) {
+      if (status.retryAttempt > spec.limits.providerRetries) { await this.retire(worker, 'OpenCode internal provider retry cap exceeded'); if (this.store.task(task.id).state !== 'needs_human') transition(this.store, task.id, 'needs_human', 'provider retry budget exhausted inside runtime'); return; }
+      if (this.store.meta(`provider-retry:${worker.id}`, -1) !== status.retryAttempt) { this.store.setMeta(`provider-retry:${worker.id}`, status.retryAttempt); this.store.event('retry', 'OpenCode provider backoff observed; no competing harness prompt', task.id, { attempt: status.retryAttempt, next: status.nextRetryAt }); }
+    }
     if (status.state === 'permission') {
       if (task.state !== 'needs_human' && task.state !== 'done') transition(this.store, task.id, 'needs_human', `pending permission ${status.permissionIds?.join(',') ?? ''}; operator review required`);
       return;
     }
     if (status.state === 'unavailable' || status.state === 'missing') { this.uncertain(worker, 'worker runtime unobservable; session/process reconciliation required'); return; }
     this.store.updateTask(task.id, { leaseUntil: Date.now() + this.policy.leaseMs });
-    if (task.started && Date.now() - task.started > spec.limits.elapsedMs && task.state !== 'done') {
-      await this.retire(worker, 'elapsed budget exhausted');
-      if (this.store.task(task.id).state !== 'needs_human') transition(this.store, task.id, 'needs_human', 'elapsed budget exhausted'); return;
-    }
     const pending = this.pending(worker);
     if (pending) {
       const history = await this.runtime.messages(handle);
@@ -110,11 +127,18 @@ export class Supervisor {
       const nextProgress = this.meaningful(this.store.task(task.id));
       this.store.transaction(() => {
         this.store.run("UPDATE dispatches SET status='completed',result=? WHERE id=?", canonical({ message: final.id, error: final.error ?? null, tokens: tokenUsage, cost: monetary }), pending.id);
-        this.store.updateTask(task.id, { noProgress: task.progress === nextProgress ? task.noProgress + 1 : 0, progress: nextProgress,
-          tokens: tokenUsage === null ? null : (task.tokens ?? 0) + tokenUsage, cost: monetary === null ? null : (task.cost ?? 0) + monetary });
+        if (worker.readOnly) { this.store.run('UPDATE actions SET result=? WHERE id=?', canonical({ session: worker.session, tokens: tokenUsage, cost: monetary, error: final.error ?? null }), `responder_${worker.id}`); this.store.event('turn', 'bounded read-only responder result reconciled', task.id, { worker: worker.id, message: final.id }); return; }
+        const trackedCommand = this.store.get("SELECT id FROM actions WHERE task=? AND kind='command' AND status IN ('queued','intent','running')", task.id);
+        const usage = this.store.all<{ result: string | null }>("SELECT d.result FROM dispatches d JOIN workers w ON w.id=d.worker WHERE w.task=? AND w.revision=? AND w.readOnly=0 AND d.status IN ('completed','cancelled')", task.id, task.revision).map(row => row.result ? JSON.parse(row.result) as { tokens: number | null; cost: number | null } : { tokens: null, cost: null });
+        const knownTokens = usage.reduce((sum, row) => sum + (row.tokens ?? 0), 0), knownCost = usage.reduce((sum, row) => sum + (row.cost ?? 0), 0);
+        this.store.setMeta(`usage:${task.id}@${task.revision}`, { knownTokens, knownCost });
+        this.store.updateTask(task.id, { noProgress: trackedCommand ? task.noProgress : task.progress === nextProgress ? task.noProgress + 1 : 0, progress: nextProgress,
+          tokens: usage.some(row => row.tokens === null) ? null : knownTokens, cost: usage.some(row => row.cost === null) ? null : knownCost });
         this.store.event('turn', 'completed turn reconciled by request/parent identities', task.id, { prompt: pending.id, message: final.id, meaningfulProgress: task.progress !== nextProgress });
+        const consumed = this.store.task(task.id);
+        if (knownTokens > spec.limits.tokens || knownCost > spec.limits.costUsd) this.store.event('budget', 'in-flight usage exceeded last-observed allowance; no further prompts authorized', task.id, { tokens: consumed.tokens, costUsd: consumed.cost, knownTokens, knownCost, limits: spec.limits });
       });
-      if (final.error) {
+      if (final.error && !worker.readOnly) {
         const current = this.store.task(task.id);
         if (current.retries >= spec.limits.providerRetries) {
           await this.retire(worker, 'provider retry budget exhausted');
@@ -123,6 +147,15 @@ export class Supervisor {
           this.store.updateTask(task.id, { retries: current.retries + 1, nextRun: Date.now() + 1000 * 2 ** current.retries });
           this.store.event('retry', 'provider error: bounded exponential backoff before useful continuation', task.id, { error: redact(final.error, this.service.secrets) });
         }
+      }
+      const checkpoint = this.store.get<{ body: string }>('SELECT body FROM checkpoints WHERE worker=? AND created>=? ORDER BY created DESC LIMIT 1', worker.id, pending.created);
+      const outcome = checkpoint ? (JSON.parse(checkpoint.body) as { outcome?: string }).outcome : null;
+      if (outcome === 'replace_session' && this.store.task(task.id).state === 'running' && await this.retire(worker, 'worker requested fresh context at a safe boundary')) {
+        transition(this.store, task.id, 'ready', 'rehydrate replacement session from spec/diff/evidence/mail'); this.store.updateTask(task.id, { worker: null });
+      } else if (outcome === 'recoverable_failure' && this.store.task(task.id).state === 'running') {
+        const current = this.store.task(task.id);
+        if (current.retries >= spec.limits.providerRetries) { await this.retire(worker, 'recoverable retry budget exhausted'); transition(this.store, task.id, 'needs_human', 'recoverable failure retry budget exhausted'); }
+        else { this.store.updateTask(task.id, { retries: current.retries + 1, nextRun: Date.now() + 1000 * 2 ** current.retries }); this.store.event('retry', 'structured recoverable result; bounded backoff without changing criteria', task.id); }
       }
     }
     const current = this.store.task(task.id);
@@ -138,6 +171,17 @@ export class Supervisor {
     const spec = this.store.spec(task), now = Date.now();
     if (!readOnly && task.attempt >= spec.limits.attempts) { transition(this.store, task.id, 'needs_human', 'attempt budget exhausted'); return null; }
     const workerId = uid('worker'), token = randomBytes(32).toString('hex');
+    let base = task.baseCommit;
+    if (!readOnly && !task.workspace && spec.dependencies.length) {
+      base = this.workspaces.integrationHead(this.store.policy(task), task.baseCommit);
+      // A newly unblocked dependency task starts from the exact integrated result, not its pre-dependency plan base.
+      for (const dependency of spec.dependencies) {
+        const integrated = this.store.get<{ candidate: string }>("SELECT candidate FROM integrations WHERE task=? AND revision=? AND state='advanced' ORDER BY created DESC LIMIT 1", dependency.id, dependency.revision);
+        if (!integrated) throw new Error('dependency completion lacks integrated immutable evidence');
+        this.workspaces.ancestor(integrated.candidate, base);
+      }
+      this.workspaces.ancestor(task.baseCommit, base);
+    }
     const claimed = this.store.transaction(() => {
       if (!readOnly && (this.store.task(task.id).state !== 'ready' || !task.approval || !this.dependencies(task))) return false;
       for (const key of spec.locks) {
@@ -148,14 +192,15 @@ export class Supervisor {
       this.store.run('INSERT INTO workers VALUES (?,?,?,?,?,?,?,?,?,?)', workerId, task.id, task.revision, readOnly ? task.attempt : task.attempt + 1, null, null, 'starting', hash(token), Number(readOnly), now);
       if (!readOnly) {
         transition(this.store, task.id, 'running', 'atomic claim: approved revision, dependencies, capacity and named locks satisfied');
-        this.store.updateTask(task.id, { worker: workerId, attempt: task.attempt + 1, started: task.started ?? now, leaseUntil: now + this.policy.leaseMs });
-        this.store.run('INSERT INTO attempts VALUES (?,?,?,?,?,?,?)', task.id, task.attempt + 1, workerId, task.baseCommit, now, null, null);
+        this.store.updateTask(task.id, { worker: workerId, attempt: task.attempt + 1, started: task.started ?? now, leaseUntil: now + this.policy.leaseMs, baseCommit: base });
+        this.store.run('INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?)', task.id, task.revision, task.attempt + 1, workerId, base, now, null, null);
+        this.store.event('base', 'explicit claim base includes completed dependency integration', task.id, { planned: task.baseCommit, actual: base });
       }
       return true;
     });
     if (!claimed) return null;
     try {
-      const workspace = readOnly ? this.workspaces.candidate(this.store.submission(task)?.commit ?? task.baseCommit, 'responder') : task.workspace ?? this.workspaces.create(task.id, task.baseCommit, task.attempt + 1);
+      const workspace = readOnly ? this.workspaces.candidate(this.store.submission(task)?.commit ?? task.baseCommit, 'responder') : task.workspace ?? this.workspaces.create(task.id, base, task.attempt + 1, task.revision);
       if (!readOnly) this.store.updateTask(task.id, { workspace });
       this.service.secrets.push(token);
       const handle = await this.runtime.start({ id: workerId, directory: workspace, task: spec, policy: this.store.policy(task), controlUrl: this.service.url, token, readOnly });
@@ -173,8 +218,12 @@ export class Supervisor {
   private async prompt(worker: WorkerRow): Promise<void> {
     if (this.pending(worker)) return;
     const task = this.store.task(worker.task), spec = this.store.spec(task), handle = this.store.handle(worker);
+    if (Date.now() >= this.deadline) return;
+    if (this.store.meta('mode', 'stopped') !== 'running' || this.store.meta(`milestone:${task.milestone}`, 'paused') !== 'active') return;
+    if (this.store.get("SELECT id FROM actions WHERE task=? AND kind='command' AND status IN ('queued','intent','running','uncertain')", task.id)) return;
     if (task.nextRun > Date.now()) return;
-    if (!worker.readOnly && (task.prompts >= spec.limits.prompts || task.noProgress >= spec.limits.noProgress || (task.tokens ?? 0) >= spec.limits.tokens || (task.cost ?? 0) >= spec.limits.costUsd)) {
+    const usage = this.store.meta(`usage:${task.id}@${task.revision}`, { knownTokens: task.tokens ?? 0, knownCost: task.cost ?? 0 });
+    if (!worker.readOnly && (task.prompts >= spec.limits.prompts || task.noProgress >= spec.limits.noProgress || usage.knownTokens >= spec.limits.tokens || usage.knownCost >= spec.limits.costUsd)) {
       await this.retire(worker, 'prompt/progress/consumption budget exhausted');
       if (this.store.task(task.id).state !== 'needs_human') transition(this.store, task.id, 'needs_human', 'finite prompt, no-progress or consumption budget exhausted'); return;
     }
@@ -193,7 +242,8 @@ export class Supervisor {
     });
     let outcome: 'accepted' | 'rejected' | 'uncertain';
     try { outcome = await this.runtime.dispatch(handle, messageId, prompt); } catch { outcome = 'uncertain'; }
-    this.store.run('UPDATE dispatches SET status=? WHERE id=?', outcome, messageId);
+    if (this.store.worker(worker.id).status !== 'active') { this.store.run("UPDATE dispatches SET status='cancelled' WHERE id=?", messageId); return; }
+    this.store.run("UPDATE dispatches SET status=? WHERE id=? AND status!='cancelled'", outcome, messageId);
     if (outcome === 'accepted') this.service.delivered(task.id, mail.map(m => m.id));
     else if (outcome === 'rejected') {
       this.store.updateTask(task.id, { nextRun: Date.now() + 1000 * 2 ** task.retries, retries: task.retries + 1 });
@@ -208,7 +258,11 @@ export class Supervisor {
         if (chain.has(cursor)) { for (const task of chain) if (this.store.task(task).state === 'blocked') transition(this.store, task, 'needs_human', `unresolved message/dependency cycle: ${[...chain].join(' -> ')}`); break; }
         chain.add(cursor);
         const next = waiting.get(cursor);
-        if (next) { const responder = this.store.task(next); if (this.store.spec(responder).dependencies.some(d => chain.has(d.id) && this.store.task(d.id).state !== 'done')) { transition(this.store, start, 'needs_human', 'responder depends on waiting task; message/dependency cycle'); break; } }
+        if (next) {
+          const responder = this.store.task(next), spec = this.store.spec(responder);
+          if (spec.dependencies.some(d => chain.has(d.id) && this.store.task(d.id).state !== 'done')) { transition(this.store, start, 'needs_human', 'responder depends on waiting task; message/dependency cycle'); break; }
+          if (responder.state === 'ready' && spec.locks.some(key => { const lock = this.store.get<{ task: string }>('SELECT task FROM resource_locks WHERE key=?', key); return lock && chain.has(lock.task); })) { transition(this.store, start, 'needs_human', 'responder waits for a named lock held by waiting sender; message/lock cycle'); break; }
+        }
         cursor = next;
       }
     }
@@ -221,11 +275,17 @@ export class Supervisor {
         try { await this.reconcile(worker); } catch (error) { this.uncertain(worker, `reconciliation failed: ${redact(errorText(error), this.service.secrets)}`); }
       }
       this.cycles();
+      if (Date.now() >= this.deadline) { this.store.setMeta('mode', 'stopped'); return; }
       const mode = this.store.meta('mode', 'stopped');
       if (mode !== 'running') return;
       for (const task of this.store.tasks()) {
+        if (Date.now() >= this.deadline) { this.store.setMeta('mode', 'stopped'); return; }
+        if (task.state === 'ready') {
+          const reason = this.store.meta(`milestone:${task.milestone}`, 'paused') !== 'active' ? 'milestone paused' : !task.approval ? 'approval required' : !this.dependencies(task) ? 'waiting on exact dependency revisions' : task.nextRun > Date.now() ? 'retry backoff' : this.activeCount() >= this.policy.resources.implementations ? 'implementation capacity occupied' : this.store.spec(task).locks.some(key => { const row = this.store.get<{ task: string }>('SELECT task FROM resource_locks WHERE key=?', key); return row && row.task !== task.id; }) ? 'named exclusive lock occupied' : 'eligible for atomic claim';
+          if (this.store.meta(`schedule:${task.id}`, '') !== reason) { this.store.event('scheduling', reason, task.id); this.store.setMeta(`schedule:${task.id}`, reason); }
+        }
         if (this.store.meta(`milestone:${task.milestone}`, 'paused') !== 'active') continue;
-        if (task.state === 'blocked' && this.service.readMail(task.id).some(m => ['answer', 'decision', 'evidence'].includes(m.type)) && this.activeCount() < this.policy.resources.implementations) {
+        if ((task.state === 'blocked' || (task.state === 'needs_human' && task.waitingFor === 'operator')) && this.service.readMail(task.id).some(m => task.waitingFor === 'operator' ? m.sender === 'operator' && m.type === 'answer' : ['answer', 'decision', 'evidence'].includes(m.type)) && this.activeCount() < this.policy.resources.implementations) {
           const worker = task.worker ? this.store.worker(task.worker) : null;
           if (worker?.status === 'active' && (await this.runtime.status(this.store.handle(worker))).state === 'idle' && !this.pending(worker)) {
             transition(this.store, task.id, 'running', 'addressed reply woke idle blocked owner; capacity reacquired'); this.store.updateTask(task.id, { waitingFor: null });
@@ -242,12 +302,12 @@ export class Supervisor {
           const responded = this.store.all<ActionRow>("SELECT * FROM actions WHERE task=? AND kind='responder'", current.id).flatMap(a => (JSON.parse(a.data) as { messages: string[] }).messages);
           if (this.service.readMail(current.id).some(m => !responded.includes(m.id))) { const responder = await this.claim(current, true); if (responder) await this.prompt(responder); }
         }
-        if (current.state === 'submitted' && !this.store.get("SELECT id FROM workers WHERE task=? AND status!='stopped' AND readOnly=0", current.id) && !this.verification.has(current.id) && this.verification.size < this.policy.resources.verification) {
+        if (current.state === 'submitted' && !this.store.get("SELECT id FROM workers WHERE task=? AND status!='stopped' AND readOnly=0", current.id) && !this.verification.has(current.id) && this.verification.size + Number(Boolean(this.integrating)) < this.policy.resources.verification) {
           const promise = this.verifier.verify(current.id).then(() => {}).catch(error => this.store.event('verification-error', errorText(error), current.id)).finally(() => this.verification.delete(current.id));
           this.verification.set(current.id, promise);
         }
       }
-      if (!this.integrating) {
+      if (!this.integrating && this.verification.size < this.policy.resources.verification) {
         const task = this.store.tasks().find(t => t.state === 'integration' && this.store.meta(`milestone:${t.milestone}`, 'paused') === 'active');
         if (task) this.integrating = this.integrator.integrate(task.id).then(() => {}).catch(error => { this.store.event('integration-error', errorText(error), task.id); this.store.setMeta('mode', 'paused'); }).finally(() => { this.integrating = null; });
       }
@@ -264,16 +324,34 @@ export class Supervisor {
       if (action === 'stop') await this.stopWorkers(milestone);
       return { mode: this.store.meta('mode', 'stopped') };
     }
-    if (action === 'cancel') {
-      const { task } = z.object({ task: z.string() }).strict().parse(input);
+    if (action === 'cancel' || action === 'fail') {
+      const { task, reason } = z.object({ task: z.string(), reason: z.string().min(1).optional() }).strict().parse(input);
+      if (action === 'fail' && !reason) throw new Error('failure requires an operator reason');
+      this.verifier.runner.cancelTask(task);
       for (const worker of this.store.all<WorkerRow>("SELECT * FROM workers WHERE task=? AND status!='stopped'", task)) if (!await this.retire(worker, 'operator cancellation')) return { state: 'needs_human' };
       this.store.run("UPDATE dispatches SET status='cancelled' WHERE worker IN (SELECT id FROM workers WHERE task=?) AND status IN ('intent','accepted','uncertain')", task);
-      transition(this.store, task, 'cancelled', 'operator cancelled; owned workers stopped; unfinished checkout preserved'); return { state: 'cancelled' };
+      this.store.run("UPDATE integrations SET state='failed' WHERE task=? AND state IN ('prepared','created','checked')", task);
+      const state = action === 'cancel' ? 'cancelled' : 'failed';
+      transition(this.store, task, state, `${reason ?? 'operator cancelled'}; owned workers stopped; unfinished checkout preserved`); return { state };
     }
     if (action === 'retry') {
       const { task, reason } = z.object({ task: z.string(), reason: z.string().min(1) }).strict().parse(input);
+      if (!this.store.task(task).approval || !['failed', 'cancelled', 'needs_human', 'blocked'].includes(this.store.task(task).state)) throw new Error('retry requires approved failed/cancelled/blocked work');
       if (this.store.get("SELECT id FROM workers WHERE task=? AND status!='stopped'", task) || this.store.get("SELECT id FROM actions WHERE task=? AND status IN ('intent','running','uncertain')", task)) throw new Error('reconcile/stop prior owners and actions before retry');
       transition(this.store, task, 'ready', `operator retry within existing limits: ${reason}`); this.store.updateTask(task, { worker: null }); return { state: 'ready' };
+    }
+    if (action === 'reconcile-worker') {
+      const { worker: workerId, reason } = z.object({ worker: z.string(), reason: z.string().min(1) }).strict().parse(input);
+      const worker = this.store.worker(workerId);
+      if (!worker.handle) {
+        const launch = await this.runtime.reconcileStart?.(worker.id);
+        if (launch?.handle) { worker.handle = canonical(launch.handle); worker.session = launch.handle.session; this.store.run('UPDATE workers SET handle=?,session=? WHERE id=?', worker.handle, worker.session, worker.id); }
+        else if (launch?.state === 'stopped') this.store.run("UPDATE workers SET status='stopped' WHERE id=?", worker.id);
+        else throw new Error('ownership still uncertain; inspect/terminate the recorded owned process before reconciliation');
+      }
+      if (worker.handle && !await this.retire(worker, `operator reconciliation: ${reason}`)) throw new Error('cannot confirm owned worker termination');
+      this.store.run("UPDATE dispatches SET status='cancelled' WHERE worker=? AND status IN ('intent','accepted','uncertain')", worker.id);
+      this.store.event('reconciliation', reason, worker.task, { worker: worker.id, result: 'confirmed stopped; inspect external actions before retry' }); return { worker: worker.id, state: 'stopped', next: 'resolve uncertain external actions, then explicit retry within remaining limits' };
     }
     throw new Error(`unknown supervisor control ${action}`);
   }
@@ -287,9 +365,11 @@ export class Supervisor {
       }
     }
     await Promise.all([...this.verification.values(), ...(this.integrating ? [this.integrating] : [])]);
+    await this.verifier.runner.drain();
   }
   async run(maxMs = 3_600_000, exitOnBlocked = false): Promise<void> {
     const end = Date.now() + maxMs;
+    this.deadline = end;
     try {
       await this.recover();
       while (Date.now() < end && this.store.meta('mode', 'stopped') !== 'stopped') {

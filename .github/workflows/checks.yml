@@ -1,0 +1,36 @@
+name: Offline harness and headless Rust
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: tools/harness/npm-shrinkwrap.json
+      - run: npm --prefix tools/harness ci
+      - run: npm run test:harness
+      - run: npm --prefix tools/harness run test:package
+  rust-headless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked -p project_core -p headless --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: node scripts/replay.mjs
+      # Desktop build/rendering is a separate local gate in .harness/project.yaml.
+      # No graphical pass is implied by headless CI; no model credentials are used.

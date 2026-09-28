@@ -30,6 +30,7 @@ export async function fixture(slots = 3, check = 'process.exit(0)') {
   const runtimeAdapter = new FakeRuntime(), workspaces = new Workspaces(repo, runtime);
   const assemble = () => {
     const service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy), verifier = new Verifier(store, workspaces, runner), integrator = new Integrator(store, workspaces, verifier);
+    service.runner = runner;
     const supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
     return { service, runner, verifier, integrator, supervisor };
   };

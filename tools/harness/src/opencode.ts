@@ -5,12 +5,14 @@ import type { ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type { RuntimeMessage, RuntimeStatus, StartWorker, WorkerHandle, WorkerRuntime } from './runtime.js';
 import { WorkerStartError } from './runtime.js';
 import { minimalEnv } from './commands.js';
+import { reservedPaths } from './schema.js';
 import { packageRoot } from './profiles.js';
 import { canonical, errorText, hash, identity, privateWrite, processState, redact, sleep } from './util.js';
 
@@ -23,14 +25,17 @@ export function workerPermissions(input: StartWorker): NonNullable<Config['permi
   const readOnly = input.readOnly || input.policy.roles[input.task.role]?.readOnly;
   const edit: Record<string, 'allow' | 'deny'> = { '*': 'deny' };
   if (!readOnly) for (const path of input.task.editablePaths) { edit[path] = 'allow'; edit[join(input.directory, path)] = 'allow'; }
-  if (input.task.kind !== 'maintenance') for (const path of input.policy.protectedPaths) { edit[path] = 'deny'; edit[join(input.directory, path)] = 'deny'; }
+  if (input.task.kind !== 'maintenance') for (const path of [...reservedPaths, ...input.policy.protectedPaths]) { edit[path] = 'deny'; edit[join(input.directory, path)] = 'deny'; }
   if (!input.task.allowDependencies) for (const path of input.policy.dependencyPaths) { edit[path] = 'deny'; edit[join(input.directory, path)] = 'deny'; }
   return { '*': 'ask', read: { '*': 'allow', '*.env': 'deny', '*.env.*': 'deny', '*auth.json': 'deny', '*credentials*': 'deny', '*operator.json': 'deny', '*secret*': 'deny' }, glob: 'allow', grep: 'allow', list: 'allow', edit,
     bash: { '*': 'ask', 'git status*': 'allow', 'git diff*': 'allow', 'git log*': 'allow', 'git show*': 'allow', 'git rev-parse*': 'allow',
       ...(readOnly ? {} : { 'git add *': 'allow' as const, 'git commit *': 'allow' as const }),
       'git push*': 'deny', 'git reset*': 'deny', 'git clean*': 'deny', 'git checkout*': 'deny', 'git switch*': 'deny', 'git config*': 'deny', 'git worktree*': 'deny', 'git update-ref*': 'deny', 'git -C *': 'deny', 'git -c *': 'deny', 'sudo *': 'deny', 'su *': 'deny', 'rm *': 'deny', 'npm publish*': 'deny', 'cargo publish*': 'deny', 'env*': 'deny', 'printenv*': 'deny',
+      'cargo *': 'deny', 'npm *': 'deny', 'npx *': 'deny', 'node *': 'deny', 'make*': 'deny', 'rustc *': 'deny', 'cc *': 'deny',
+      'opencode *': 'deny', 'harness *': 'deny', 'nohup *': 'deny', 'tmux *': 'deny', 'screen *': 'deny',
+      'git commit *--amend*': 'deny', 'git commit *--no-verify*': 'deny', 'git commit *-n*': 'deny', 'git *--pathspec-from-file*': 'deny',
     }, task: 'deny', external_directory: 'deny', question: 'deny', todowrite: 'deny', skill: 'deny',
-    harness_context: 'allow', harness_mail_send: 'allow', harness_mail_read: 'allow', harness_mail_ack: 'allow', harness_checkpoint: 'allow', harness_block: readOnly ? 'deny' : 'allow', harness_submit: readOnly ? 'deny' : 'allow',
+    harness_context: 'allow', harness_evidence: 'allow', harness_mail_send: 'allow', harness_mail_read: 'allow', harness_mail_ack: 'allow', harness_checkpoint: 'allow', harness_check: readOnly ? 'deny' : 'allow', harness_block: readOnly ? 'deny' : 'allow', harness_submit: readOnly ? 'deny' : 'allow',
   };
 }
 function rules(permission: NonNullable<Config['permission']>): PermissionRuleset {
@@ -47,6 +52,7 @@ export function verifyPermissions(effective: PermissionRuleset, intended: NonNul
 }
 
 export class OpenCodeRuntime implements WorkerRuntime {
+  private readonly toolSource = readFileSync(join(packageRoot, 'templates/opencode/harness.ts'), 'utf8').replace("'@opencode-ai/plugin'", JSON.stringify(import.meta.resolve('@opencode-ai/plugin')));
   private readonly clients = new Map<string, Client>();
   private readonly children = new Map<string, ChildProcess>();
   private readonly inFlight = new Set<string>();
@@ -65,12 +71,11 @@ export class OpenCodeRuntime implements WorkerRuntime {
     return { healthy: !result.error && result.status === 0 && result.stdout.trim() === '1.18.33', detail: result.error ? result.error.message : `OpenCode ${result.stdout.trim()}; tested/pinned 1.18.33` };
   }
   async start(input: StartWorker): Promise<WorkerHandle> {
-    if (!(await this.health()).healthy) throw new Error('OpenCode version missing/incompatible; rerun compatibility probe before upgrading');
+    if (!(await this.health()).healthy) throw new WorkerStartError('OpenCode version missing/incompatible; rerun compatibility probe before upgrading', true);
     const directory = realpathSync(input.directory), serverDirectory = join(this.runtimeDirectory, 'servers', input.id);
     mkdirSync(join(serverDirectory, 'tools'), { recursive: true, mode: 0o700 });
-    writeFileSync(join(serverDirectory, 'tools/harness.ts'), readFileSync(join(packageRoot, 'templates/opencode/harness.ts')), { mode: 0o600 });
-    // Resolve the pinned plugin helper from this installed package, never from an application workspace.
-    symlinkSync(join(packageRoot, 'node_modules'), join(serverDirectory, 'node_modules'), 'dir');
+    // Snapshot at runtime construction; resolve pinned helper correctly even when npm hoists dependencies.
+    writeFileSync(join(serverDirectory, 'tools/harness.ts'), this.toolSource, { mode: 0o600 });
     const permission = workerPermissions(input), role = input.policy.roles[input.task.role]; if (!role) throw new Error('unknown role');
     const config: Config = { $schema: 'https://opencode.ai/config.json', autoupdate: false, share: 'disabled', formatter: false, lsp: false, subagent_depth: 0,
       permission: { '*': 'ask', task: 'deny' },
@@ -84,17 +89,19 @@ export class OpenCodeRuntime implements WorkerRuntime {
     const baseUrl = `http://127.0.0.1:${port}`;
     const processFile = join(serverDirectory, 'process.json'); privateWrite(processFile, { state: 'intent', directory, baseUrl, pid: null });
     const env = minimalEnv(Object.fromEntries(input.policy.providerEnv.flatMap(name => process.env[name] ? [[name, process.env[name]!]] : [])));
+    for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'OPENCODE_CONFIG']) if (process.env[key]) env[key] = process.env[key];
     Object.assign(env, { OPENCODE_SERVER_PASSWORD: password, OPENCODE_SERVER_USERNAME: 'opencode', OPENCODE_CONFIG_DIR: serverDirectory,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
       HARNESS_WORKER_TOKEN: input.token, HARNESS_ENDPOINT_FILE: join(this.runtimeDirectory, 'endpoint.json'),
-      TMPDIR: join(serverDirectory, 'tmp'), CARGO_TARGET_DIR: join(serverDirectory, 'build'), CARGO_BUILD_JOBS: '1' });
+      HARNESS_TOOLS_URL: pathToFileURL(join(serverDirectory, 'tools/harness.ts')).href,
+      TMPDIR: join(serverDirectory, 'tmp') });
     mkdirSync(env.TMPDIR!, { recursive: true });
     let executable = this.executable, args = ['serve', '--hostname', '127.0.0.1', '--port', String(port)];
     if (!input.policy.approvedPlugins.length) args.push('--pure');
     if (input.policy.sandbox) { args = [...input.policy.sandbox.args, executable, ...args]; executable = input.policy.sandbox.executable; }
     const child = spawn(executable, args, { cwd: directory, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }); this.children.set(input.id, child);
     const exited = new Promise<void>(resolve => { child.once('exit', () => resolve()); child.once('error', () => resolve()); });
-    let output = ''; const collect = (chunk: Buffer): void => { output = (output + redact(chunk.toString(), [password, input.token])).slice(-64_000); };
+    let output = ''; const collect = (chunk: Buffer): void => { output = (output + chunk.toString()).slice(-64_000); };
     child.stdout?.on('data', collect); child.stderr?.on('data', collect);
     try {
       await Promise.race([once(child, 'spawn'), exited.then(() => { throw new Error('owned OpenCode process failed to start'); })]);
@@ -118,10 +125,11 @@ export class OpenCodeRuntime implements WorkerRuntime {
       const agents = (await client.app.agents({ directory }, { throwOnError: true })).data, agent = agents.find(a => a.name === 'harness_worker');
       if (!agent || !agent.steps || agent.steps > input.task.limits.steps) throw new Error('effective agent step cap missing/exceeds approval');
       privateWrite(join(serverDirectory, 'permission-probe.json'), { effective: agent.permission, intended: rules(permission) });
-      verifyPermissions(agent.permission, permission, join(path.home, '.local/share/opencode/tool-output/*'));
+      verifyPermissions(agent.permission, permission, join(env.XDG_DATA_HOME ?? join(path.home, '.local/share'), 'opencode/tool-output/*'));
       const providers = (await client.provider.list({ directory }, { throwOnError: true })).data;
-      let configured = role.model ?? merged.model;
-      if (!configured && agent.model) configured = `${agent.model.providerID}/${agent.model.modelID}`;
+      const configuredDefaultAgent = agents.find(a => a.name === (merged.default_agent ?? 'build'));
+      const inheritedModel = agent.model ?? configuredDefaultAgent?.model;
+      let configured = role.model ?? (inheritedModel ? `${inheritedModel.providerID}/${inheritedModel.modelID}` : merged.model);
       if (!configured) {
         // Same existing recent selection as the user's OpenCode UI, not a provider fallback.
         const recent = z.object({ recent: z.array(z.object({ providerID: z.string(), modelID: z.string() })) }).passthrough().parse(JSON.parse(readFileSync(join(path.state, 'model.json'), 'utf8'))).recent[0];
@@ -139,8 +147,9 @@ export class OpenCodeRuntime implements WorkerRuntime {
       privateWrite(join(serverDirectory, 'effective-summary.json'), { version: '1.18.33', model, role: input.task.role, steps: agent.steps, permissionHash: hash(agent.permission), plugins, session: session.id, directory });
       privateWrite(join(serverDirectory, 'handle.json'), handle); return handle;
     } catch (error) {
-      await this.terminate(child.pid!, child, exited); privateWrite(processFile, { state: 'stopped-after-start-failure', directory, error: redact(errorText(error), [password, input.token]), output });
+      if (child.pid) await this.terminate(child.pid, child, exited);
       const stopped = !child.pid || child.exitCode !== null || child.signalCode !== null || processState(identity(child.pid)) === 'dead';
+      privateWrite(processFile, { state: stopped ? 'stopped-after-start-failure' : 'uncertain', stopped, directory, pid: child.pid ?? null, error: redact(errorText(error), [password, input.token]), output: redact(output, [password, input.token]) });
       if (stopped) this.children.delete(input.id);
       throw new WorkerStartError(errorText(error), stopped);
     }
@@ -154,6 +163,22 @@ export class OpenCodeRuntime implements WorkerRuntime {
       const session = (await client.session.get({ directory: handle.directory, sessionID: handle.session }, { throwOnError: true, signal: AbortSignal.timeout(5000) })).data;
       return realpathSync(path.directory) === realpathSync(handle.directory) && session.directory === handle.directory ? 'owned' : 'uncertain';
     } catch { return 'uncertain'; }
+  }
+  async reconcileStart(id: string): Promise<{ state: 'owned' | 'stopped' | 'uncertain'; handle?: WorkerHandle }> {
+    const directory = join(this.runtimeDirectory, 'servers', id);
+    try {
+      const handle = z.object({ id: z.literal(id), session: z.string(), directory: z.string(), metadata: metadataSchema }).strict().parse(JSON.parse(readFileSync(join(directory, 'handle.json'), 'utf8')));
+      return { state: await this.resume(handle), handle };
+    } catch { /* Launch can fail before a session/handle exists. Inspect persisted process identity next. */ }
+    try {
+      const record = z.object({ state: z.string(), stopped: z.boolean().optional(), pid: z.number().int().positive().nullable().optional(), start: z.string().nullable().optional() }).passthrough().parse(JSON.parse(readFileSync(join(directory, 'process.json'), 'utf8')));
+      if (record.stopped || record.state === 'stopped') return { state: 'stopped' };
+      if (!record.pid || record.start === undefined) return { state: 'uncertain' };
+      const expected = { pid: record.pid, start: record.start }, state = processState(expected);
+      if (state === 'dead') return { state: 'stopped' };
+      if (state === 'alive') { await this.terminate(record.pid); return { state: processState(expected) === 'dead' ? 'stopped' : 'uncertain' }; }
+    } catch { /* Missing/truncated identity is not proof of termination. */ }
+    return { state: 'uncertain' };
   }
   async dispatch(handle: WorkerHandle, requestId: string, prompt: string): Promise<'accepted' | 'rejected' | 'uncertain'> {
     if (this.inFlight.has(handle.session)) throw new Error('session already has in-flight dispatch');
@@ -172,8 +197,9 @@ export class OpenCodeRuntime implements WorkerRuntime {
       const pending = (await client.permission.list({ directory }, { throwOnError: true, signal: AbortSignal.timeout(5000) })).data.filter(p => p.sessionID === handle.session);
       if (pending.length) return { state: 'permission', permissionIds: pending.map(p => p.id) };
       const statuses = (await client.session.status({ directory }, { throwOnError: true, signal: AbortSignal.timeout(5000) })).data;
-      const state = statuses[handle.session]?.type;
-      if (state === 'busy' || state === 'retry') return { state: 'busy' };
+      const state = statuses[handle.session];
+      if (state?.type === 'retry') return { state: 'busy', retryAttempt: state.attempt, nextRetryAt: state.next };
+      if (state?.type === 'busy') return { state: 'busy' };
       this.inFlight.delete(handle.session); return { state: 'idle' };
     } catch { return { state: 'unavailable' }; }
   }
@@ -217,5 +243,9 @@ export class OpenCodeRuntime implements WorkerRuntime {
     const pending = (await client.permission.list({ directory }, { throwOnError: true })).data.find(p => p.id === requestId && p.sessionID === handle.session);
     if (!pending) throw new Error('permission does not belong to worker session');
     await client.permission.reply({ directory, requestID: requestId, reply }, { throwOnError: true });
+  }
+  async permissions(handle: WorkerHandle): Promise<{ id: string; permission: string; patterns: string[] }[]> {
+    const meta = metadataSchema.parse(handle.metadata), secrets = secretsSchema.parse(JSON.parse(readFileSync(meta.secretFile, 'utf8')));
+    return (await this.client(handle).permission.list({ directory: handle.directory }, { throwOnError: true, signal: AbortSignal.timeout(5000) })).data.filter(p => p.sessionID === handle.session).map(p => ({ id: p.id, permission: p.permission, patterns: p.patterns.map(pattern => redact(pattern, [secrets.password, secrets.token])) }));
   }
 }

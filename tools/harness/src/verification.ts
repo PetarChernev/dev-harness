@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Capacity } from './commands.js';
 import type { CommandRunner } from './commands.js';
 import type { IntegrationRow, Store, TaskRow } from './store.js';
 import { transition } from './store.js';
@@ -8,15 +9,20 @@ import { canonical, errorText, git, hash, safePath, uid } from './util.js';
 
 export type Review = (task: TaskRow, workspace: string, candidate: string) => Promise<{ passed: boolean; findings: string[]; session: string }>;
 export class Verifier {
-  constructor(readonly store: Store, readonly workspaces: Workspaces, readonly runner: CommandRunner, readonly review?: Review) {}
+  private readonly capacity: Capacity;
+  constructor(readonly store: Store, readonly workspaces: Workspaces, readonly runner: CommandRunner, readonly review?: Review) { this.capacity = new Capacity(runner.policy.resources.verification); }
   async checks(task: TaskRow, workspace: string, commands: string[], semantic = true): Promise<boolean> {
+    const release = await this.capacity.acquire();
+    try { return await this.checksWithinSlot(task, workspace, commands, semantic); } finally { release(); }
+  }
+  private async checksWithinSlot(task: TaskRow, workspace: string, commands: string[], semantic: boolean): Promise<boolean> {
     const policy = this.store.policy(task);
+    const commit = git(workspace, ['rev-parse', 'HEAD']);
     for (const command of [...new Set(commands)]) {
       const definition = policy.commands[command]; if (!definition) throw new Error('command not in approved policy');
       const result = await this.runner.run(task, command, definition, workspace);
       if (!result.passed) return false;
     }
-    const commit = git(workspace, ['rev-parse', 'HEAD']);
     if (semantic && policy.integration.reviewRole) {
       if (!this.review) throw new Error('independent reviewer runtime is required by approved policy');
       const result = await this.review(task, workspace, commit);
@@ -37,23 +43,31 @@ export class Verifier {
       const candidate = this.workspaces.candidate(submission.commit);
       const artifacts = join(this.workspaces.runtime, 'artifacts', uid('submission')); mkdirSync(artifacts, { recursive: true });
       for (const name of spec.artifacts) {
-        const data = readFileSync(safePath(candidate, name)); const saved = join(artifacts, `${hash(name).slice(0, 12)}-${name.split('/').at(-1)}`); writeFileSync(saved, data);
+        const path = safePath(candidate, name); if (statSync(path).size > 20_000_000) throw new Error('submission artifact exceeds 20MB; keep large experiment data in runtime artifacts');
+        const data = readFileSync(path); const saved = join(artifacts, `${hash(name).slice(0, 12)}-${name.split('/').at(-1)}`); writeFileSync(saved, data);
         this.store.evidence(task, 'artifact', { name, path: saved, sha256: hash(data), commit: submission.commit });
       }
       const passed = await this.checks(task, candidate, spec.verification);
       this.store.evidence(task, 'verification', { passed, commit: submission.commit, policyHash: hash(policy), candidate });
+      if (this.store.task(taskId).state !== 'verifying' || this.store.task(taskId).revision !== task.revision) return false;
       transition(this.store, taskId, passed ? 'integration' : 'ready', passed ? 'independent checks passed; queued for serialized integration' : 'verification failed; repair against original criteria with command evidence');
       if (!passed) this.store.updateTask(taskId, { submission: null, worker: null });
       return passed;
-    } catch (error) { transition(this.store, taskId, 'needs_human', `verification boundary failed: ${errorText(error)}`); return false; }
+    } catch (error) { if (this.store.task(taskId).state === 'verifying') transition(this.store, taskId, 'needs_human', `verification boundary failed: ${errorText(error)}`); return false; }
   }
 }
 
 export class Integrator {
+  private inFlight = false;
   constructor(readonly store: Store, readonly workspaces: Workspaces, readonly verifier: Verifier) {}
   /** Fault injection only models crash boundaries; restart uses this same reconciliation path. */
   crashAfter?: 'candidate' | 'advance';
   async integrate(taskId: string): Promise<boolean> {
+    if (this.inFlight) throw new Error('serialized integration queue already active');
+    this.inFlight = true;
+    try { return await this.integrateOnce(taskId); } finally { this.inFlight = false; }
+  }
+  private async integrateOnce(taskId: string): Promise<boolean> {
     const task = this.store.task(taskId), submission = this.store.submission(task), policy = this.store.policy(task);
     if (task.state !== 'integration' || !submission) throw new Error('task not independently verified');
     let attempt = this.store.get<IntegrationRow>("SELECT * FROM integrations WHERE task=? AND revision=? AND state IN ('prepared','created','checked','advanced') ORDER BY created DESC LIMIT 1", taskId, task.revision);
@@ -97,7 +111,10 @@ export class Integrator {
     if (attempt.state === 'created') {
       const unfinished = this.store.get("SELECT id FROM actions WHERE task=? AND kind='command' AND status IN ('intent','running','uncertain')", taskId);
       if (unfinished) { transition(this.store, taskId, 'needs_human', 'unreconciled external check; do not repeat integration commands'); return false; }
-      const passed = await this.verifier.checks(task, attempt.workspace, JSON.parse(attempt.checks) as string[]);
+      let passed: boolean;
+      try { passed = await this.verifier.checks(task, attempt.workspace, JSON.parse(attempt.checks) as string[]); }
+      catch (error) { this.store.run("UPDATE integrations SET state='failed' WHERE id=?", attempt.id); this.store.evidence(task, 'integration-boundary', { error: errorText(error), workspace: attempt.workspace }); if (this.store.task(taskId).state === 'integration') transition(this.store, taskId, 'needs_human', `combined verification boundary: ${errorText(error)}`); return false; }
+      if (this.store.task(taskId).state !== 'integration' || this.store.task(taskId).revision !== task.revision) { this.store.run("UPDATE integrations SET state='failed' WHERE id=?", attempt.id); return false; }
       this.store.evidence(task, 'combined-verification', { passed, previous: attempt.previous, candidate: attempt.candidate });
       if (!passed) { this.store.run("UPDATE integrations SET state='failed' WHERE id=?", attempt.id); transition(this.store, taskId, 'ready', 'combined checks failed; integration target unchanged, repair required'); this.store.updateTask(taskId, { submission: null, worker: null }); return false; }
       this.store.run("UPDATE integrations SET state='checked' WHERE id=?", attempt.id); attempt.state = 'checked';

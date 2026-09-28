@@ -36,7 +36,7 @@ commands:
 integration:
   branch: harness/integration
   checks: [check]
-protectedPaths: ['tools/harness/**', '.harness/**', '.opencode/**', opencode.json, 'tests/**']
+protectedPaths: ['tools/harness/**', '.harness/**', '.opencode/**', opencode.json, '**/tests/**']
 dependencyPaths: ['**/package.json', '**/package-lock.json', '**/Cargo.toml', '**/Cargo.lock']
 sharedLocks:
   manifests: ['**/package.json', '**/package-lock.json', '**/Cargo.toml', '**/Cargo.lock']

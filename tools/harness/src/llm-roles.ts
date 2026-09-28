@@ -7,7 +7,8 @@ import { planSchema, taskSchema, validateGraph } from './schema.js';
 import type { Project, TaskSpec } from './schema.js';
 import type { StateService } from './service.js';
 import type { Store, TaskRow } from './store.js';
-import type { WorkerRuntime } from './runtime.js';
+import { WorkerStartError } from './runtime.js';
+import type { WorkerRuntime, WorkerHandle } from './runtime.js';
 import type { Workspaces } from './workspace.js';
 import { canonical, hash, sleep, uid } from './util.js';
 
@@ -20,7 +21,14 @@ export async function readOnlyTurn(store: Store, service: StateService, runtime:
   const id = uid('role'), token = randomBytes(32).toString('hex'), action = uid('role_action'), requestId = `msg_${randomBytes(16).toString('hex')}`;
   store.run('INSERT INTO actions VALUES (?,?,?,?,?,?,?)', action, task.id, 'readonly-role', 'intent', canonical({ role: task.role, requestId, directory }), null, Date.now());
   if (registerTask) store.run('INSERT INTO workers VALUES (?,?,?,?,?,?,?,?,?,?)', id, registerTask.id, registerTask.revision, registerTask.attempt, null, null, 'starting', hash(token), 2, Date.now());
-  const handle = await runtime.start({ id, directory, task, policy, controlUrl: service.url, token, readOnly: true });
+  let handle: WorkerHandle;
+  try { handle = await runtime.start({ id, directory, task, policy, controlUrl: service.url, token, readOnly: true }); }
+  catch (error) {
+    const stopped = error instanceof WorkerStartError && error.stopped;
+    store.run('UPDATE actions SET status=? WHERE id=?', stopped ? 'failed' : 'uncertain', action);
+    if (registerTask) store.run('UPDATE workers SET status=? WHERE id=?', stopped ? 'stopped' : 'uncertain', id);
+    throw error;
+  }
   store.run('UPDATE actions SET data=?,status=? WHERE id=?', canonical({ handle, requestId, role: task.role }), 'running', action);
   if (registerTask) store.run("UPDATE workers SET session=?,handle=?,status='active' WHERE id=?", handle.session, canonical(handle), id);
   try {
@@ -33,12 +41,12 @@ export async function readOnlyTurn(store: Store, service: StateService, runtime:
       if (state.state === 'permission') throw new Error(`read-only role pending permission: ${state.permissionIds?.join(',')}`);
       if (state.state === 'unavailable' || state.state === 'missing') throw new Error('read-only session unobservable; action uncertain');
       if (state.state === 'idle') {
-        const history = await runtime.messages(handle), result = history.filter(m => m.parent === requestId && m.complete && m.role === 'assistant').at(-1);
+        const history = await runtime.messages(handle), replies = history.filter(m => m.parent === requestId && m.complete && m.role === 'assistant'), result = replies.at(-1);
         if (!history.some(m => m.id === requestId)) throw new Error('ambiguous read-only dispatch; no automatic retry');
         if (!result) { await sleep(100); continue; }
         if (result.error) throw new Error(`read-only role error: ${result.error}`);
         const output = jsonResult(result.text);
-        store.run("UPDATE actions SET status='finished',result=? WHERE id=?", canonical({ output, session: handle.session, tokens: result.tokens, cost: result.cost }), action);
+        store.run("UPDATE actions SET status='finished',result=? WHERE id=?", canonical({ output, session: handle.session, tokens: replies.some(m => m.tokens === null) ? null : replies.reduce((sum, m) => sum + m.tokens!, 0), cost: replies.some(m => m.cost === null) ? null : replies.reduce((sum, m) => sum + m.cost!, 0) }), action);
         if (registerTask) store.run("UPDATE dispatches SET status='completed',result=? WHERE id=?", canonical({ message: result.id }), requestId);
         return { output, session: handle.session };
       }

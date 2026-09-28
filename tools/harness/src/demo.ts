@@ -19,9 +19,9 @@ export async function demo(repoInput: string, runtimeAdapter?: WorkerRuntime | '
   const policy = loadProject(repo);
   policy.resources.implementations = 2; policy.pollMs = runtimeAdapter ? 500 : 10;
   policy.commands = {
-    alpha: { executable: process.execPath, args: ['-e', 'if(require("fs").readFileSync("alpha.txt","utf8").trim()!=="complete") process.exit(1)'], cwd: '.', env: {}, timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
-    beta: { executable: process.execPath, args: ['-e', 'if(require("fs").readFileSync("beta.txt","utf8").trim()!=="complete") process.exit(1)'], cwd: '.', env: {}, timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
-    combined: { executable: process.execPath, args: ['-e', 'const fs=require("fs");for(const p of ["alpha.txt","beta.txt"])if(fs.existsSync(p)&&fs.readFileSync(p,"utf8").trim()!=="complete")process.exit(1)'], cwd: '.', env: {}, timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
+    alpha: { executable: process.execPath, args: ['-e', 'if(require("fs").readFileSync("alpha.txt","utf8").trim()!=="complete") process.exit(1)'], cwd: '.', env: {}, envFrom: [], timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
+    beta: { executable: process.execPath, args: ['-e', 'if(require("fs").readFileSync("beta.txt","utf8").trim()!=="complete") process.exit(1)'], cwd: '.', env: {}, envFrom: [], timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
+    combined: { executable: process.execPath, args: ['-e', 'const fs=require("fs");for(const p of ["alpha.txt","beta.txt"])if(fs.existsSync(p)&&fs.readFileSync(p,"utf8").trim()!=="complete")process.exit(1)'], cwd: '.', env: {}, envFrom: [], timeoutMs: 10_000, artifacts: [], graphical: false, buildJobs: 1 },
   };
   policy.integration.checks = ['combined']; writeProject(join(repo, '.harness/project.yaml'), policy);
   writeFileSync(join(repo, '.gitignore'), 'artifacts/\nnode_modules/\n'); writeFileSync(join(repo, 'README.md'), 'Disposable harness smoke demonstration.\n');

@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "profile": {
+      "type": "string",
+      "enum": [
+        "generic-command",
+        "rust-bevy"
+      ]
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+    },
+    "roles": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "instructions": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "pattern": "^[^/\\s]+\\/.+$"
+          },
+          "readOnly": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instructions",
+          "readOnly"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "executable": {
+            "type": "string",
+            "minLength": 1
+          },
+          "args": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "default": ".",
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "."
+              },
+              {
+                "type": "string",
+                "minLength": 1
+              }
+            ]
+          },
+          "env": {
+            "default": {},
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "envFrom": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z_][A-Z0-9_]*$"
+            }
+          },
+          "timeoutMs": {
+            "default": 120000,
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000
+          },
+          "artifacts": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "graphical": {
+            "default": false,
+            "type": "boolean"
+          },
+          "buildJobs": {
+            "default": 1,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          }
+        },
+        "required": [
+          "executable",
+          "args",
+          "cwd",
+          "env",
+          "envFrom",
+          "timeoutMs",
+          "artifacts",
+          "graphical",
+          "buildJobs"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "resources": {
+      "default": {
+        "implementations": 3,
+        "verification": 1,
+        "graphical": 1,
+        "buildJobs": 2
+      },
+      "type": "object",
+      "properties": {
+        "implementations": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "verification": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "graphical": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "buildJobs": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        }
+      },
+      "required": [
+        "implementations",
+        "verification",
+        "graphical",
+        "buildJobs"
+      ],
+      "additionalProperties": false
+    },
+    "defaults": {
+      "default": {
+        "attempts": 3,
+        "prompts": 12,
+        "steps": 12,
+        "elapsedMs": 1800000,
+        "noProgress": 3,
+        "providerRetries": 2,
+        "sessionPrompts": 8,
+        "tokens": 200000,
+        "costUsd": 5
+      },
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "prompts": {
+          "default": 12,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "steps": {
+          "default": 12,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "elapsedMs": {
+          "default": 1800000,
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 86400000
+        },
+        "noProgress": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "providerRetries": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "sessionPrompts": {
+          "default": 8,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "tokens": {
+          "default": 200000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "costUsd": {
+          "default": 5,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "attempts",
+        "prompts",
+        "steps",
+        "elapsedMs",
+        "noProgress",
+        "providerRetries",
+        "sessionPrompts",
+        "tokens",
+        "costUsd"
+      ],
+      "additionalProperties": false
+    },
+    "integration": {
+      "default": {
+        "branch": "harness/integration",
+        "checks": []
+      },
+      "type": "object",
+      "properties": {
+        "branch": {
+          "default": "harness/integration",
+          "type": "string",
+          "pattern": "^harness\\/[a-zA-Z0-9_-]+$"
+        },
+        "checks": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+          }
+        },
+        "reviewRole": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+        }
+      },
+      "required": [
+        "branch",
+        "checks"
+      ],
+      "additionalProperties": false
+    },
+    "protectedPaths": {
+      "default": [
+        "tools/harness/**",
+        ".harness/**",
+        ".opencode/**",
+        "opencode.json",
+        "**/tests/**"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "dependencyPaths": {
+      "default": [
+        "**/package.json",
+        "**/package-lock.json",
+        "**/Cargo.toml",
+        "**/Cargo.lock",
+        "package.json",
+        "package-lock.json",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "sharedLocks": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "leaseMs": {
+      "default": 30000,
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 9007199254740991
+    },
+    "pollMs": {
+      "default": 1000,
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 9007199254740991
+    },
+    "trustedLocal": {
+      "default": true,
+      "type": "boolean",
+      "const": true
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "executable",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "providerEnv": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z_][A-Z0-9_]*$"
+      }
+    },
+    "executionEnv": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "approvedPlugins": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "profile",
+    "name",
+    "roles",
+    "commands",
+    "resources",
+    "defaults",
+    "integration",
+    "protectedPaths",
+    "dependencyPaths",
+    "sharedLocks",
+    "leaseMs",
+    "pollMs",
+    "trustedLocal",
+    "providerEnv",
+    "executionEnv",
+    "approvedPlugins"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:local-first:harness:project:v1"
+}

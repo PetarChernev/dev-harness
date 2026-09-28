@@ -5,17 +5,19 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { mailSchema, submissionSchema, id, relativePath } from './schema.js';
 import type { MailInput } from './schema.js';
-import type { EvidenceRow, MailRow, Store, WorkerRow } from './store.js';
+import type { ActionRow, EvidenceRow, MailRow, Store, WorkerRow } from './store.js';
+import type { CommandRunner } from './commands.js';
 import { transition } from './store.js';
-import { canonical, errorText, git, hash, privateWrite, redact, uid } from './util.js';
+import { canonical, errorText, git, hash, privateWrite, redact, safePath, uid } from './util.js';
 import type { Workspaces } from './workspace.js';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 export class StateService {
   readonly operatorToken: string;
   readonly secrets: string[];
   server?: Server;
   url = '';
+  runner?: CommandRunner;
   onControl?: (action: string, input: Record<string, unknown>) => Promise<unknown>;
   constructor(readonly store: Store, readonly workspaces: Workspaces) {
     const path = join(workspaces.runtime, 'operator.json');
@@ -28,8 +30,10 @@ export class StateService {
     return { task, spec, role: this.store.policy(task).roles[spec.role], readOnly: Boolean(worker.readOnly),
       roster: this.store.tasks().map(t => ({ id: t.id, role: this.store.spec(t).role, state: t.state })),
       messages: this.readMail(worker.task), checkpoints: this.store.all('SELECT * FROM checkpoints WHERE task=? ORDER BY created DESC LIMIT 10', task.id),
-      evidence: this.store.all<EvidenceRow>('SELECT * FROM evidence WHERE task=? AND valid=1 ORDER BY created DESC LIMIT 10', task.id),
-      instructions: 'Inspect the current Git diff and relevant checks. Only durable submission plus independent verification and integration can finish a task. Acknowledge each message ID after processing; retries retain IDs. Do not spawn unmanaged agents. A conversation cannot change approved criteria.',
+      evidence: this.store.all<EvidenceRow>('SELECT * FROM evidence WHERE task=? AND revision=? AND valid=1 ORDER BY created DESC LIMIT 10', task.id, task.revision),
+      activeChecks: this.store.all("SELECT id,status,result FROM actions WHERE task=? AND kind='command' AND status IN ('queued','intent','running','uncertain')", task.id),
+      approvedDecisions: this.store.all("SELECT time,reason,data FROM events WHERE task=? AND type='decision' ORDER BY seq", task.id),
+      instructions: 'Inspect the current Git diff and relevant checks. Only durable submission plus independent verification and integration can finish a task. Acknowledge each message ID after processing; retries retain IDs. Use scoped harness tools for every state mutation; never edit SQLite/runtime files or use operator administration commands. Do not spawn unmanaged agents. A conversation cannot change approved criteria.',
     };
   }
   worker(token: string, session: string): WorkerRow {
@@ -74,8 +78,30 @@ export class StateService {
       case 'mail-send': return this.sendMail(worker.task, input);
       case 'mail-read': { z.object({}).strict().parse(input); const mail = this.readMail(worker.task); this.delivered(worker.task, mail.map(m => m.id)); return mail; }
       case 'mail-ack': { const args = z.object({ id }).strict().parse(input); this.acknowledge(worker.task, args.id); return { acknowledged: args.id }; }
+      case 'evidence': {
+        const args = z.object({ id, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50_000).default(20_000) }).strict().parse(input);
+        const evidence = this.store.get<EvidenceRow>('SELECT * FROM evidence WHERE id=? AND task=? AND revision=? AND valid=1', args.id, task.id, task.revision);
+        if (!evidence) throw new Error('evidence not in authorized task revision');
+        const data: unknown = JSON.parse(evidence.data);
+        if (evidence.kind !== 'command') return { ...evidence, data };
+        const { log } = z.object({ log: z.string() }).passthrough().parse(data);
+        const text = readFileSync(safePath(this.workspaces.runtime, relative(this.workspaces.runtime, log)), 'utf8');
+        return { id: args.id, data, output: text.slice(args.offset, args.offset + args.limit), nextOffset: args.offset + args.limit < text.length ? args.offset + args.limit : null };
+      }
+      case 'check': {
+        if (worker.readOnly || task.state !== 'running' || !this.runner) throw new Error('only running implementation owners can request approved checks');
+        const args = z.object({ id, command: id }).strict().parse(input), spec = this.store.spec(task), policy = this.store.policy(task);
+        if (!spec.verification.includes(args.command) || !policy.commands[args.command]) throw new Error('check ID not approved for task');
+        const action = `workercheck_${hash(`${worker.id}:${args.id}`).slice(0, 32)}`;
+        const old = this.store.get<ActionRow>('SELECT * FROM actions WHERE id=?', action);
+        if (old && (old.task !== task.id || (JSON.parse(old.data) as { name: string }).name !== args.command)) throw new Error('check request ID collision');
+        if (!old) void this.runner.run(task, args.command, policy.commands[args.command]!, task.workspace!, action).catch(error => this.store.event('worker-check', `approved check failed: ${errorText(error)}`, task.id, { action }));
+        const row = this.store.get<ActionRow>('SELECT * FROM actions WHERE id=?', action);
+        if (!row) throw new Error('check policy rejected before queueing');
+        return { id: args.id, action, state: row.status, result: row.result ? JSON.parse(row.result) : null, instruction: 'Reuse this ID to inspect the same action; do not relaunch on HTTP timeout. Running/queued checks are tracked by the supervisor.' };
+      }
       case 'checkpoint': {
-        const args = z.object({ id, summary: z.string().max(20_000), artifacts: z.array(relativePath).default([]) }).strict().parse(input);
+        const args = z.object({ id, summary: z.string().max(20_000), artifacts: z.array(relativePath).default([]), outcome: z.enum(['progress', 'recoverable_failure', 'replace_session']).default('progress') }).strict().parse(input);
         const fingerprint = this.workspaces.fingerprint(task.workspace!);
         const body = canonical({ ...args, summary: redact(args.summary, this.secrets), fingerprint });
         const old = this.store.get<{ body: string; worker: string }>('SELECT body,worker FROM checkpoints WHERE id=?', args.id);
@@ -86,10 +112,11 @@ export class StateService {
       case 'block': {
         if (worker.readOnly) throw new Error('read-only responder cannot change implementation state');
         const args = z.object({ reason: z.string().min(1).max(5000), waitingFor: id.optional(), human: z.boolean().default(false) }).strict().parse(input);
+        if (args.human && args.waitingFor) throw new Error('choose human or addressed-agent waiting, not both');
         if (args.waitingFor) this.store.task(args.waitingFor);
         if (task.state !== 'running') throw new Error('only running work may declare a blocker');
         transition(this.store, task.id, args.human ? 'needs_human' : 'blocked', redact(args.reason, this.secrets));
-        this.store.updateTask(task.id, { waitingFor: args.waitingFor ?? null });
+        this.store.updateTask(task.id, { waitingFor: args.human ? 'operator' : args.waitingFor ?? null });
         return { state: this.store.task(task.id).state };
       }
       case 'submit': {
@@ -97,6 +124,7 @@ export class StateService {
         const submission = submissionSchema.parse(input);
         if (task.state === 'submitted' && task.submission === canonical(submission)) return { state: task.state };
         if (task.state !== 'running') throw new Error('only running owner can submit');
+        if (this.store.get("SELECT id FROM actions WHERE task=? AND kind='command' AND status IN ('queued','intent','running','uncertain')", task.id)) throw new Error('reconcile/finish tracked commands before submission');
         this.workspaces.validate(this.store.spec(task), this.store.policy(task), task.workspace!, task.baseCommit, submission);
         this.store.transaction(() => {
           this.store.updateTask(task.id, { submission: canonical(submission) });
@@ -126,6 +154,7 @@ export class StateService {
         if (req.method !== 'POST' || req.headers.origin) throw new Error('only authenticated local POST requests supported');
         const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
         const parts = (req.url ?? '').split('/').filter(Boolean);
+        if (parts.length !== 2) throw new Error('unknown API route');
         let body = ''; for await (const chunk of req) { body += String(chunk); if (body.length > 100_000) throw new Error('request too large'); }
         const input: unknown = JSON.parse(body || '{}');
         let output: unknown;

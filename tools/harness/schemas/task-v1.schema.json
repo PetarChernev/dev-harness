@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+    },
+    "revision": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "milestone": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+    },
+    "kind": {
+      "default": "code",
+      "type": "string",
+      "enum": [
+        "code",
+        "research",
+        "maintenance"
+      ]
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dependencies": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+          },
+          "revision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "revision"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "role": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+    },
+    "editablePaths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "locks": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      }
+    },
+    "acceptance": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "verification": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      }
+    },
+    "artifacts": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "prompts": {
+          "default": 12,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "steps": {
+          "default": 12,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "elapsedMs": {
+          "default": 1800000,
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 86400000
+        },
+        "noProgress": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "providerRetries": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "sessionPrompts": {
+          "default": 8,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "tokens": {
+          "default": 200000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "costUsd": {
+          "default": 5,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "attempts",
+        "prompts",
+        "steps",
+        "elapsedMs",
+        "noProgress",
+        "providerRetries",
+        "sessionPrompts",
+        "tokens",
+        "costUsd"
+      ],
+      "additionalProperties": false
+    },
+    "decisionRecord": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowDependencies": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "revision",
+    "milestone",
+    "kind",
+    "objective",
+    "dependencies",
+    "role",
+    "editablePaths",
+    "locks",
+    "acceptance",
+    "verification",
+    "artifacts",
+    "limits",
+    "allowDependencies"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:local-first:harness:task:v1"
+}

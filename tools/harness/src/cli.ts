@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { delimiter, isAbsolute, resolve, join } from 'node:path';
 import { Store } from './store.js';
 import { FakeRuntime } from './runtime.js';
 import { initProject, loadProject } from './profiles.js';
@@ -28,8 +28,11 @@ targeted(cli.command('init').description('Generate a packaged project profile; r
   if (!['generic-command', 'rust-bevy'].includes(String(opts.profile))) throw new Error('unknown profile'); print({ created: initProject(opts.repo, opts.profile as 'generic-command' | 'rust-bevy') });
 });
 targeted(cli.command('doctor').description('Profile-aware prerequisite inspection; no model calls')).action((opts: Options) => {
-  const checks = ['git', ...(existsSync(join(opts.repo, '.harness/project.yaml')) && loadProject(opts.repo).profile === 'rust-bevy' ? ['rustc', 'cargo', 'pkg-config'] : []), 'opencode'].map(executable => { const result = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 10_000 }); return { executable, available: !result.error && result.status === 0, version: result.stdout?.trim() || null }; });
-  print({ mode: 'trusted-local', node: process.version, pinnedNode: 'v24.21.0', nodeMatches: process.version === 'v24.21.0', checks, credentials: 'not tested', graphical: 'unverified; environment presence is not render evidence' });
+  const repo = resolve(opts.repo), policy = existsSync(join(repo, '.harness/project.yaml')) ? loadProject(repo) : null;
+  const checks = ['git', ...(policy?.profile === 'rust-bevy' ? ['rustc', 'cargo', 'pkg-config'] : []), 'opencode'].map(executable => { const result = spawnSync(executable, ['--version'], { cwd: repo, encoding: 'utf8', timeout: 10_000 }); return { executable, available: !result.error && result.status === 0, version: result.stdout?.trim() || null }; });
+  const commands = Object.entries(policy?.commands ?? {}).map(([id, definition]) => ({ id, executable: definition.executable, available: (isAbsolute(definition.executable) || definition.executable.includes('/') ? [resolve(repo, definition.cwd, definition.executable)] : (process.env.PATH ?? '').split(delimiter).map(path => join(path, definition.executable))).some(path => existsSync(path)) }));
+  const desktop = policy?.profile === 'rust-bevy' && process.platform === 'linux' ? ['x11', 'xi', 'xrandr', 'xcursor', 'xkbcommon'].map(library => { const result = spawnSync('pkg-config', ['--modversion', library], { cwd: repo, encoding: 'utf8', timeout: 5000 }); return { library, available: result.status === 0, version: result.stdout?.trim() || null }; }) : [];
+  print({ mode: 'trusted-local', profile: policy?.profile ?? null, node: process.version, pinnedNode: 'v24.21.0', nodeMatches: process.version === 'v24.21.0', checks, commands, desktop, credentials: 'not tested', graphical: 'unverified by doctor; run explicit graphical gate for render evidence' });
 });
 for (const name of ['status', 'logs']) targeted(cli.command(name).description(name === 'status' ? 'Authoritative runtime summary from SQLite' : 'Structured decision/event log')).action((opts: Options) => {
   const { runtime } = runtimeLocation(opts.repo, opts.runtime), path = join(runtime, 'state.sqlite');
@@ -46,6 +49,7 @@ targeted(cli.command('approve').description('Operator approves entire milestone 
 for (const name of ['pause', 'resume', 'drain', 'stop']) targeted(cli.command(name).description(`Persist operator ${name}; never self-resume paused work`)).option('--milestone <id>', 'scope to milestone').action((opts: Options) => call(opts, name, opts.milestone ? { milestone: opts.milestone } : {}));
 for (const name of ['verify', 'integrate', 'cancel']) targeted(cli.command(name).description(`Operator ${name} a task`)).requiredOption('--task <id>', 'task ID').action((opts: Options) => call(opts, name, { task: opts.task }));
 targeted(cli.command('retry').description('Explicit retry within approved remaining limits after reconciliation')).requiredOption('--task <id>', 'task').requiredOption('--reason <text>', 'reconciliation evidence').action((opts: Options) => call(opts, 'retry', { task: opts.task, reason: opts.reason }));
+targeted(cli.command('fail').description('Operator records terminal failure after stopping the owner; work is preserved')).requiredOption('--task <id>', 'task').requiredOption('--reason <text>', 'failure evidence').action((opts: Options) => call(opts, 'fail', { task: opts.task, reason: opts.reason }));
 targeted(cli.command('mail').description('Read addressed durable mailbox')).option('--recipient <id>', 'task identity or operator', 'operator').action((opts: Options) => call(opts, 'mail', { recipient: opts.recipient }));
 targeted(cli.command('answer').description('Authenticated operator answer; proposals require versioned decision record')).requiredOption('--question <id>', 'message ID').requiredOption('--body <text>', 'answer').option('--decision-record <path>', 'committed repository-relative record').action((opts: Options) => call(opts, 'answer', { question: opts.question, body: opts.body, ...(opts.decisionRecord ? { decisionRecord: opts.decisionRecord } : {}) }));
 targeted(cli.command('checkpoint').description('Inspect persisted checkpoints and evidence')).requiredOption('--task <id>', 'task').action((opts: Options) => {
@@ -54,9 +58,11 @@ targeted(cli.command('checkpoint').description('Inspect persisted checkpoints an
 });
 targeted(cli.command('backup').description('SQLite online backup, including committed WAL content')).requiredOption('--file <path>', 'new backup destination').action((opts: Options) => call(opts, 'backup', { file: resolve(String(opts.file)) }));
 targeted(cli.command('resolve-action').description('Record operator reconciliation of uncertain external command')).requiredOption('--id <id>', 'action ID').requiredOption('--reason <text>', 'evidence of observed outcome').action((opts: Options) => call(opts, 'resolve-action', { id: opts.id, reason: opts.reason }));
+targeted(cli.command('reconcile-worker').description('Reconcile/stop the recorded owned process before any explicit retry')).requiredOption('--worker <id>', 'worker ID').requiredOption('--reason <text>', 'operator reconciliation evidence').action((opts: Options) => call(opts, 'reconcile-worker', { worker: opts.worker, reason: opts.reason }));
 targeted(cli.command('promote').description('Explicit fast-forward promotion to clean current user branch; no push')).requiredOption('--target <branch>', 'user branch').action((opts: Options) => call(opts, 'promote', { target: opts.target }));
 targeted(cli.command('plan').description('Bounded live read-only planner produces a schema-valid draft; never approves')).requiredOption('--brief <path>', 'brief file').requiredOption('--out <path>', 'new draft YAML destination').action((opts: Options) => call(opts, 'plan', { brief: resolve(String(opts.brief)), out: resolve(String(opts.out)) }));
 targeted(cli.command('permission').description('Operator answers one scoped permission; never automatic, never always')).requiredOption('--worker <id>', 'worker ID').requiredOption('--request <id>', 'permission request ID').requiredOption('--reply <action>', 'once or reject').action((opts: Options) => call(opts, 'permission', { worker: opts.worker, request: opts.request, reply: opts.reply }));
+targeted(cli.command('permissions').description('Inspect redacted pending requests scoped to an owned session')).requiredOption('--worker <id>', 'worker ID').action((opts: Options) => call(opts, 'permissions', { worker: opts.worker }));
 targeted(cli.command('restore').description('Restore a checked SQLite backup into absent state database; supervisor must be stopped')).requiredOption('--file <path>', 'backup source').action((opts: Options) => {
   const { runtime } = runtimeLocation(opts.repo, opts.runtime), owner = new Ownership(runtime);
   try { Store.restore(resolve(String(opts.file)), join(runtime, 'state.sqlite'), owner); print({ restored: true, mode: 'inspect/reconcile before resuming' }); } finally { owner.close(); }

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { relativePath } from './schema.js';
@@ -43,7 +43,10 @@ export function safePath(root: string, name: string, allowMissing = false): stri
 }
 export function privateWrite(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  const temporary = `${path}.${uid('write')}`;
+  writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+  const descriptor = openSync(temporary, 'r'); try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  renameSync(temporary, path);
 }
 export interface ProcessIdentity { pid: number; start: string | null }
 export function identity(pid = process.pid): ProcessIdentity {

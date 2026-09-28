@@ -3,7 +3,7 @@ import type { Project, TaskSpec } from './schema.js';
 export interface WorkerHandle { id: string; session: string; directory: string; metadata: Record<string, unknown> }
 export interface StartWorker { id: string; directory: string; task: TaskSpec; policy: Project; controlUrl: string; token: string; readOnly?: boolean }
 export interface RuntimeMessage { id: string; parent?: string; role: 'user' | 'assistant'; text: string; complete: boolean; error?: string; tokens: number | null; cost: number | null }
-export interface RuntimeStatus { state: 'idle' | 'busy' | 'permission' | 'unavailable' | 'missing'; permissionIds?: string[] }
+export interface RuntimeStatus { state: 'idle' | 'busy' | 'permission' | 'unavailable' | 'missing'; permissionIds?: string[]; retryAttempt?: number; nextRetryAt?: number }
 export interface WorkerRuntime {
   start(input: StartWorker): Promise<WorkerHandle>;
   resume(handle: WorkerHandle): Promise<'owned' | 'stopped' | 'uncertain'>;
@@ -13,6 +13,7 @@ export interface WorkerRuntime {
   observe(handle: WorkerHandle, notify: () => void, signal: AbortSignal): Promise<void>;
   cancel(handle: WorkerHandle): Promise<'stopped' | 'uncertain'>;
   health(): Promise<{ healthy: boolean; detail: string }>;
+  reconcileStart?(id: string): Promise<{ state: 'owned' | 'stopped' | 'uncertain'; handle?: WorkerHandle }>;
 }
 export class WorkerStartError extends Error {
   constructor(message: string, readonly stopped: boolean) { super(message); }

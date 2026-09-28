@@ -1,0 +1,10 @@
+{
+  "count": 16,
+  "extent": 100000,
+  "speed": 100,
+  "commands": [
+    { "tick": 20, "command": { "type": "set_velocity", "id": 0, "vx": 75, "vy": -25 } },
+    { "tick": 60, "command": { "type": "pause", "value": true } },
+    { "tick": 65, "command": { "type": "pause", "value": false } }
+  ]
+}

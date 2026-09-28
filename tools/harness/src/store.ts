@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Ownership } from './ownership.js';
 import { planSchema, projectSchema, taskSchema, validateGraph } from './schema.js';
@@ -40,6 +40,10 @@ const migrations = [
   `CREATE INDEX pending_mail ON messages(recipient,acknowledged);
    CREATE INDEX task_events ON events(task,seq);
    CREATE TABLE attempts(task TEXT NOT NULL, number INTEGER NOT NULL, worker TEXT NOT NULL, baseCommit TEXT NOT NULL, started INTEGER NOT NULL, ended INTEGER, reason TEXT, PRIMARY KEY(task,number));`,
+  `ALTER TABLE attempts RENAME TO attempts_v2;
+   CREATE TABLE attempts(task TEXT NOT NULL, revision INTEGER NOT NULL, number INTEGER NOT NULL, worker TEXT NOT NULL, baseCommit TEXT NOT NULL, started INTEGER NOT NULL, ended INTEGER, reason TEXT, PRIMARY KEY(task,revision,number));
+   INSERT INTO attempts SELECT a.task,COALESCE(w.revision,t.revision,1),a.number,a.worker,a.baseCommit,a.started,a.ended,a.reason FROM attempts_v2 a LEFT JOIN workers w ON w.id=a.worker LEFT JOIN tasks t ON t.id=a.task;
+   DROP TABLE attempts_v2;`,
 ];
 
 export class Store {
@@ -76,7 +80,7 @@ export class Store {
     if (keys.some(k => !Object.keys(this.task(id)).includes(k))) throw new Error('invalid runtime field');
     if (keys.length) this.run(`UPDATE tasks SET ${keys.map(k => `${k}=?`).join(',')} WHERE id=?`, ...Object.values(patch), id);
   }
-  evidence(task: TaskRow, kind: string, data: unknown): string { const id = uid('evidence'); this.run('INSERT INTO evidence VALUES (?,?,?,?,?,?,1)', id, task.id, task.revision, kind, canonical(data), Date.now()); return id; }
+  evidence(task: TaskRow, kind: string, data: unknown): string { const id = uid('evidence'); this.run('INSERT INTO evidence VALUES (?,?,?,?,?,?,?)', id, task.id, task.revision, kind, canonical(data), Date.now(), Number(this.task(task.id).revision === task.revision)); return id; }
   importPlan(input: unknown): Plan {
     const plan = planSchema.parse(input);
     const existing = this.tasks().map(t => this.spec(t)); validateGraph(plan, existing);
@@ -86,20 +90,26 @@ export class Store {
         if (old && old.hash !== hash(spec)) throw new Error(`immutable revision ${spec.id}@${spec.revision}; create a new revision and approve it`);
         const active = this.get<TaskRow>('SELECT * FROM tasks WHERE id=?', spec.id);
         if (active && active.revision > spec.revision) throw new Error('cannot import obsolete revision');
-        if (active && active.revision === spec.revision) continue;
+        if (active && active.revision === spec.revision) {
+          if (this.meta(`spec-base:${spec.id}@${spec.revision}`, active.baseCommit) !== plan.baseCommit) throw new Error('immutable revision base commit changed');
+          continue;
+        }
         if (active && this.get('SELECT id FROM workers WHERE task=? AND status!=?', spec.id, 'stopped')) throw new Error('stop/reconcile worker before revising task');
         if (active) {
           const affected = new Set([spec.id]);
           let changed = true;
           while (changed) { changed = false; for (const t of existing) if (!affected.has(t.id) && t.dependencies.some(d => affected.has(d.id))) { affected.add(t.id); changed = true; } }
           for (const taskId of affected) {
+            if (['running', 'submitted', 'verifying', 'integration'].includes(this.task(taskId).state) || this.get("SELECT id FROM actions WHERE task=? AND status IN ('queued','intent','running','uncertain')", taskId)) throw new Error('stop/reconcile active work and cancel obsolete submissions before revising');
             if (this.get('SELECT id FROM workers WHERE task=? AND status!=?', taskId, 'stopped')) throw new Error('dependent worker must be stopped before revision');
             this.run('UPDATE evidence SET valid=0 WHERE task=?', taskId);
+            this.run('DELETE FROM resource_locks WHERE task=?', taskId);
             this.run("UPDATE tasks SET approval=NULL,state='draft',submission=NULL,blocker='specification revision invalidated prior verification' WHERE id=?", taskId);
           }
         }
         this.run('INSERT OR IGNORE INTO specs VALUES (?,?,?,?)', spec.id, spec.revision, hash(spec), canonical(spec));
-        this.run(`INSERT INTO tasks(id,revision,milestone,state,baseCommit) VALUES (?,?,?,'draft',?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,milestone=excluded.milestone,state='draft',approval=NULL,attempt=0,prompts=0,started=NULL,worker=NULL,workspace=NULL,submission=NULL,baseCommit=excluded.baseCommit`, spec.id, spec.revision, spec.milestone, plan.baseCommit);
+        this.setMeta(`spec-base:${spec.id}@${spec.revision}`, plan.baseCommit);
+        this.run(`INSERT INTO tasks(id,revision,milestone,state,baseCommit) VALUES (?,?,?,'draft',?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,milestone=excluded.milestone,state='draft',approval=NULL,attempt=0,prompts=0,started=NULL,worker=NULL,workspace=NULL,submission=NULL,tokens=NULL,cost=NULL,retries=0,noProgress=0,progress='',nextRun=0,leaseUntil=NULL,waitingFor=NULL,blocker=NULL,baseCommit=excluded.baseCommit`, spec.id, spec.revision, spec.milestone, plan.baseCommit);
       }
       this.event('import', 'immutable draft revisions imported; approval required', null, { milestone: plan.milestone, hash: hash(plan) });
     });
@@ -117,7 +127,7 @@ export class Store {
     }
     const approval = uid('approval');
     this.transaction(() => {
-      this.run('INSERT INTO approvals VALUES (?,?,?,?,?,?)', approval, milestone, canonical(tasks.map(t => this.spec(t))), canonical(policy), hash({ policy, tasks: tasks.map(t => this.spec(t)) }), Date.now());
+      this.run('INSERT INTO approvals VALUES (?,?,?,?,?,?)', approval, milestone, canonical({ tasks: tasks.map(t => this.spec(t)), bases: tasks.map(t => ({ id: t.id, commit: t.baseCommit })) }), canonical(policy), hash({ policy, tasks: tasks.map(t => this.spec(t)) }), Date.now());
       for (const task of tasks) this.updateTask(task.id, { approval, state: 'ready', blocker: null });
       this.setMeta(`milestone:${milestone}`, 'active');
       this.event('approval', 'operator approved included immutable revisions, policy and finite limits', null, { milestone, approval });
@@ -125,21 +135,25 @@ export class Store {
     return approval;
   }
   submission(task: TaskRow): Submission | null { return task.submission ? JSON.parse(task.submission) as Submission : null; }
-  async backup(path: string): Promise<void> { this.mutate(); if (existsSync(path)) throw new Error('backup destination exists'); mkdirSync(dirname(path), { recursive: true }); await this.db.backup(path); this.event('backup', 'SQLite online backup completed', null, { path }); }
+  async backup(path: string): Promise<void> { this.mutate(); if (existsSync(path)) throw new Error('backup destination exists'); mkdirSync(dirname(path), { recursive: true }); closeSync(openSync(path, 'wx', 0o600)); await this.db.backup(path); this.event('backup', 'SQLite online backup completed', null, { path }); }
   close(): void { this.db.close(); }
   static restore(source: string, destination: string, ownership: Ownership): void {
     ownership.assert();
     const backup = new Database(source, { readonly: true, fileMustExist: true });
-    try { if (backup.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('invalid backup'); if ((backup.pragma('user_version', { simple: true }) as number) > migrations.length) throw new Error('newer backup schema'); } finally { backup.close(); }
+    try {
+      if (backup.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('invalid backup');
+      const version = backup.pragma('user_version', { simple: true }) as number;
+      if (version < 1 || version > migrations.length || !backup.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='specs'").get()) throw new Error('unsupported or non-harness backup schema');
+    } finally { backup.close(); }
     if (existsSync(destination) || existsSync(destination + '-wal')) throw new Error('restore requires absent destination; archive old database with supervisor stopped');
     const temporary = join(dirname(destination), uid('restore')); copyFileSync(source, temporary); renameSync(temporary, destination);
   }
 }
 
 const transitions: Record<State, State[]> = {
-  draft: ['ready', 'cancelled'], ready: ['running', 'blocked', 'needs_human', 'cancelled'],
+  draft: ['ready', 'cancelled'], ready: ['running', 'blocked', 'needs_human', 'failed', 'cancelled'],
   running: ['submitted', 'blocked', 'needs_human', 'failed', 'cancelled', 'ready'],
-  submitted: ['verifying', 'needs_human', 'ready', 'cancelled'], verifying: ['integration', 'ready', 'needs_human', 'failed', 'cancelled'],
+  submitted: ['verifying', 'needs_human', 'ready', 'failed', 'cancelled'], verifying: ['integration', 'ready', 'needs_human', 'failed', 'cancelled'],
   integration: ['done', 'ready', 'needs_human', 'failed', 'cancelled'], done: [],
   blocked: ['running', 'ready', 'needs_human', 'failed', 'cancelled'], needs_human: ['ready', 'running', 'cancelled', 'failed'],
   failed: ['ready', 'cancelled'], cancelled: ['ready'],

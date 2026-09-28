@@ -19,6 +19,7 @@ export const commandSchema = z.object({
   executable: z.string().min(1), args: z.array(z.string()).default([]),
   cwd: z.union([z.literal('.'), relativePath]).default('.'),
   env: z.record(z.string(), z.string()).default({}),
+  envFrom: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/)).default([]),
   timeoutMs: z.number().int().positive().max(3_600_000).default(120_000),
   artifacts: z.array(relativePath).default([]),
   graphical: z.boolean().default(false), buildJobs: z.number().int().min(0).max(128).default(1),
@@ -40,13 +41,14 @@ export const projectSchema = z.object({
   integration: z.object({ branch: z.string().regex(/^harness\/[a-zA-Z0-9_-]+$/).default('harness/integration'),
     checks: z.array(id).default([]), reviewRole: id.optional(),
   }).strict().default({ branch: 'harness/integration', checks: [] }),
-  protectedPaths: z.array(globPath).default(['tools/harness/**', '.harness/**', '.opencode/**', 'opencode.json', 'tests/**']),
+  protectedPaths: z.array(globPath).default(['tools/harness/**', '.harness/**', '.opencode/**', 'opencode.json', '**/tests/**']),
   dependencyPaths: z.array(globPath).default(['**/package.json', '**/package-lock.json', '**/Cargo.toml', '**/Cargo.lock', 'package.json', 'package-lock.json', 'Cargo.toml', 'Cargo.lock']),
   sharedLocks: z.record(id, z.array(globPath)).default({}),
   leaseMs: z.number().int().min(100).default(30_000), pollMs: z.number().int().min(10).default(1000),
   trustedLocal: z.literal(true).default(true),
   sandbox: z.object({ executable: z.string().min(1), args: z.array(z.string()) }).strict().optional(),
   providerEnv: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/)).default([]),
+  executionEnv: z.record(z.string(), z.string()).default({}),
   approvedPlugins: z.array(z.string()).default([]),
 }).strict().superRefine((p, ctx) => {
   for (const name of p.integration.checks) if (!p.commands[name]) ctx.addIssue({ code: 'custom', message: `unknown integration command ${name}` });
@@ -69,6 +71,7 @@ export type Project = z.infer<typeof projectSchema>;
 export type TaskSpec = z.infer<typeof taskSchema>;
 export type Plan = z.infer<typeof planSchema>;
 export type Command = z.infer<typeof commandSchema>;
+export const reservedPaths = ['tools/harness/**', '.harness/**', '.opencode/**', 'opencode.json', 'opencode.jsonc'] as const;
 export const states = ['draft', 'ready', 'running', 'submitted', 'verifying', 'integration', 'done', 'blocked', 'needs_human', 'failed', 'cancelled'] as const;
 export type State = typeof states[number];
 export const submissionSchema = z.object({ revision: z.number().int().positive(), commit: sha,

@@ -21,24 +21,32 @@ export function status(store: Store): unknown {
   return { schemaVersion: 1, mode: store.meta('mode', 'stopped'), release: store.meta('release', null),
     tasks: store.tasks().map(task => ({ ...task, nextAction: ({ draft: 'review and approve milestone', ready: 'await satisfied dependencies/capacity or resume', running: 'reconcile session and continue useful work', submitted: 'stop writer and verify independently', verifying: 'await approved command evidence', integration: 'rerun combined checks and serialize advance', done: 'review integrated evidence; explicit promotion', blocked: 'await addressed reply', needs_human: 'operator must resolve blocker', failed: 'inspect evidence; bounded retry or new revision', cancelled: 'preserved; explicit retry only' } as const)[task.state],
       session: task.worker ? store.worker(task.worker).session : null,
+      model: task.worker && store.worker(task.worker).handle ? store.handle(store.worker(task.worker)).metadata.model ?? 'unknown' : 'not started',
       evidence: store.all('SELECT id,kind,created,valid FROM evidence WHERE task=? ORDER BY created', task.id),
-      consumption: { prompts: task.prompts, tokens: task.tokens ?? 'unknown', costUsd: task.cost ?? 'unknown' },
+      consumption: { scope: 'observed implementation turns', prompts: task.prompts, tokens: task.tokens ?? 'unknown', costUsd: task.cost ?? 'unknown', knownLowerBound: store.meta(`usage:${task.id}@${task.revision}`, { knownTokens: task.tokens ?? 0, knownCost: task.cost ?? 0 }), unmeasuredTurns: store.get<{ count: number }>("SELECT count(*) count FROM dispatches d JOIN workers w ON w.id=d.worker WHERE w.task=? AND w.revision=? AND d.status IN ('intent','accepted','uncertain','cancelled')", task.id, task.revision)!.count },
+      limits: store.spec(task).limits,
+      observedOverage: { tokens: Math.max(0, (task.tokens ?? 0) - store.spec(task).limits.tokens), costUsd: task.cost === null ? 'unknown' : Math.max(0, task.cost - store.spec(task).limits.costUsd) },
     })),
     pendingMail: store.all('SELECT id,thread,sender,recipient,task,type,delivered,acknowledged FROM messages WHERE acknowledged IS NULL'),
+    workers: store.all('SELECT id,task,revision,attempt,session,status,readOnly,created FROM workers ORDER BY created'),
+    readOnlyRoleConsumption: store.all<{ id: string; task: string; result: string | null }>("SELECT id,task,result FROM actions WHERE kind IN ('readonly-role','responder')").map(action => { const result = action.result ? JSON.parse(action.result) as { tokens?: number | null; cost?: number | null; session?: string } : null; return { id: action.id, task: action.task, session: result?.session ?? null, tokens: result?.tokens ?? 'unknown', costUsd: result?.cost ?? 'unknown' }; }),
     unresolvedActions: store.all("SELECT * FROM actions WHERE status IN ('intent','running','uncertain')"),
     integrations: store.all('SELECT * FROM integrations ORDER BY created'),
   };
 }
-export function releaseIdentity(): { version: string; hash: string } {
+export function releaseIdentity(): { version: string; hash: string; build: unknown } {
   const directory = join(packageRoot, 'dist');
   const sources = readdirSync(directory).filter(p => p.endsWith('.js')).sort().map(p => [p, readFileSync(join(directory, p), 'utf8')]);
-  return { version: '0.1.0', hash: hash({ sources, manifest: JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) }) };
+  const build: unknown = existsSync(join(directory, 'build-info.json')) ? JSON.parse(readFileSync(join(directory, 'build-info.json'), 'utf8')) : null;
+  const lock = existsSync(join(packageRoot, 'npm-shrinkwrap.json')) ? hash(readFileSync(join(packageRoot, 'npm-shrinkwrap.json'))) : z.object({ dependencyLock: z.string() }).passthrough().parse(build).dependencyLock;
+  return { version: '0.1.0', hash: hash({ sources, workerTools: readFileSync(join(packageRoot, 'templates/opencode/harness.ts'), 'utf8'), manifest: JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')), lock }), build };
 }
 export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime, explicitRuntime?: string) {
   const { repo, runtime } = runtimeLocation(repoInput, explicitRuntime), policy = loadProject(repo), ownership = new Ownership(runtime);
   let store: Store;
   try { store = new Store(join(runtime, 'state.sqlite'), ownership); } catch (error) { ownership.close(); throw error; }
   const workspaces = new Workspaces(repo, runtime), service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy);
+  service.runner = runner;
   const verifier = new Verifier(store, workspaces, runner, reviewer(store, service, runtimeAdapter)), integrator = new Integrator(store, workspaces, verifier), supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
   let supervised = false;
   const operate = async (action: string, input: Record<string, unknown> = {}): Promise<unknown> => {
@@ -53,6 +61,7 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
       case 'approve': {
         const { milestone } = z.object({ milestone: z.string() }).strict().parse(input);
         const committed = projectSchema.parse(parse(git(repo, ['show', 'HEAD:.harness/project.yaml'])));
+        if (supervised && hash(committed) !== hash(policy)) throw new Error('stop before approving a changed supervisor policy');
         if (hash(committed) !== hash(loadProject(repo))) throw new Error('commit project policy before approval');
         const source = store.meta<{ file: string; hash: string } | null>(`plan-source:${milestone}`, null);
         if (!source) throw new Error('import a versioned plan before approval');
@@ -65,16 +74,24 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
           workspaces.commit(task.baseCommit);
           const decision = store.spec(task).decisionRecord; if (decision) git(repo, ['show', `${task.baseCommit}:${decision}`]);
         }
-        return { approval: store.approve(milestone, committed), limits: committed.defaults, resources: committed.resources };
+        const approval = store.approve(milestone, committed);
+        return { approval, defaults: committed.defaults, resources: committed.resources, approved: store.tasks().filter(t => t.approval === approval).map(t => ({ id: t.id, revision: t.revision, limits: store.spec(t).limits })) };
       }
       case 'answer': return service.answer(input);
       case 'permission': {
         const { worker, request, reply } = z.object({ worker: z.string(), request: z.string(), reply: z.enum(['once', 'reject']) }).strict().parse(input);
         if (!(runtimeAdapter instanceof OpenCodeRuntime)) throw new Error('permission reply requires a live OpenCode runtime');
-        const owner = store.worker(worker); await runtimeAdapter.permission(store.handle(owner), request, reply);
+        const owner = store.worker(worker);
+        if (reply === 'once' && store.tasks().filter(t => ['running', 'submitted'].includes(t.state)).length >= policy.resources.implementations) throw new Error('wait for implementation capacity before resuming a permission-blocked worker');
+        await runtimeAdapter.permission(store.handle(owner), request, reply);
         store.event('permission', 'operator explicitly answered scoped permission request', owner.task, { worker, request, reply });
         if (store.task(owner.task).state === 'needs_human') { store.updateTask(owner.task, { state: 'running', blocker: null }); }
         return { request, reply };
+      }
+      case 'permissions': {
+        const { worker } = z.object({ worker: z.string() }).strict().parse(input);
+        if (!(runtimeAdapter instanceof OpenCodeRuntime)) throw new Error('requires live runtime');
+        return runtimeAdapter.permissions(store.handle(store.worker(worker)));
       }
       case 'plan': {
         const { brief, out } = z.object({ brief: z.string(), out: z.string() }).strict().parse(input);

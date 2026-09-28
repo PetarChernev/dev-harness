@@ -115,7 +115,7 @@ test('real subprocess errors, timeout, WAL online backup, migrations and canonic
   const timeout = await f.runner.run(task, 'timeout', commandSchema.parse({ executable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], timeoutMs: 25 }), f.repo);
   expect(timeout.timedOut).toBe(true);
   const backup = join(f.root, 'backup.sqlite'); await f.store.backup(backup);
-  const restored = new Store(backup); expect(restored.task('a').state).toBe('ready'); expect(restored.db.pragma('user_version', { simple: true })).toBe(2); restored.close();
+  const restored = new Store(backup); expect(restored.task('a').state).toBe('ready'); expect(restored.db.pragma('user_version', { simple: true })).toBe(3); restored.close();
   expect(() => new Ownership(f.runtime)).toThrow('already owned');
   const workspace = f.workspaces.create('path', f.base, 1); const { runtimeLocation } = await import('../src/util.js'); expect(runtimeLocation(workspace).runtime).toBe(f.runtime);
 });

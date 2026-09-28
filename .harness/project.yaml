@@ -1,0 +1,42 @@
+schemaVersion: 1
+name: neutral-project
+profile: rust-bevy
+roles:
+  planner:
+    readOnly: true
+    instructions: Draft only requested scope with explicit acceptance, dependencies, paths, locks, command IDs, artifacts and finite limits. Never approve or invent a game.
+  implementer:
+    instructions: Implement the approved revision. Inspect the current diff, use addressed harness mail, and submit immutable evidence. No unmanaged agents.
+  core:
+    instructions: Maintain renderer-independent behavior and reproducible explicit-tick experiments within the approved scope. Use harness mail for shared-interface questions.
+  presentation:
+    instructions: Visualize the shared core with neutral generated geometry. Keep graphical prerequisites separate. No game content or visual identity. Use harness mail for shared-interface questions.
+  researcher:
+    instructions: Produce versioned reports and reproducible experiments with configuration hashes, seeds, commands, environment, results and limitations.
+  reviewer:
+    readOnly: true
+    instructions: Independently inspect immutable candidates and acceptance. Report JSON findings; do not edit or approve your own implementation.
+resources: { implementations: 3, verification: 1, graphical: 1, buildJobs: 2 }
+executionEnv:
+  CARGO_TARGET_DIR: '{buildDir}'
+  CARGO_BUILD_JOBS: '{buildJobs}'
+defaults: { attempts: 3, prompts: 12, steps: 12, elapsedMs: 1800000, noProgress: 3, providerRetries: 2, sessionPrompts: 8, tokens: 200000, costUsd: 5 }
+commands:
+  fmt: { executable: cargo, args: [fmt, --all, --check], timeoutMs: 60000, buildJobs: 0 }
+  lint: { executable: cargo, args: [clippy, --locked, -p, project_core, -p, headless, --all-targets, --, '-D', warnings], timeoutMs: 300000, buildJobs: 2 }
+  core-test: { executable: cargo, args: [test, --locked, -p, project_core, -p, headless], timeoutMs: 300000, buildJobs: 2 }
+  headless-smoke: { executable: cargo, args: [run, --locked, -p, headless, --, --seed, '42', --ticks, '120', --input, experiments/example.json, --output, artifacts/headless.json], artifacts: [artifacts/headless.json], timeoutMs: 300000, buildJobs: 2 }
+  replay: { executable: node, args: [scripts/replay.mjs], timeoutMs: 300000, buildJobs: 2 }
+  desktop-build: { executable: cargo, args: [build, --locked, -p, desktop], timeoutMs: 1800000, buildJobs: 2 }
+  desktop-smoke: { executable: node, args: [scripts/desktop-smoke.mjs], envFrom: [DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR, XAUTHORITY], timeoutMs: 660000, graphical: true, buildJobs: 2 }
+integration:
+  branch: harness/integration
+  checks: [fmt, lint, core-test, replay]
+protectedPaths: ['tools/harness/**', '.harness/**', '.opencode/**', opencode.json, 'tests/**', 'scripts/replay.mjs', 'scripts/desktop-smoke.mjs']
+dependencyPaths: ['**/Cargo.toml', '**/Cargo.lock', '**/package.json', '**/package-lock.json']
+sharedLocks:
+  manifests: ['**/Cargo.toml', '**/Cargo.lock', '**/package.json', '**/package-lock.json']
+  core-interface: ['crates/project_core/src/lib.rs']
+leaseMs: 30000
+pollMs: 1000
+trustedLocal: true
