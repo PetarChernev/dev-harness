@@ -74,6 +74,10 @@ export function runtimeLocation(repoInput: string, explicit?: string): { repo: s
   }
   mkdirSync(runtime, { recursive: true, mode: 0o700 });
   const resolved = realpathSync(runtime);
+  const binding = join(resolved, 'repository.json');
+  try { writeFileSync(binding, JSON.stringify(common), { flag: 'wx', mode: 0o600 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  if (JSON.parse(readFileSync(binding, 'utf8')) !== common) throw new Error('runtime is bound to another repository; choose a distinct canonical runtime');
   if (saved === null) writeFileSync(marker, JSON.stringify(resolved), { flag: 'wx', mode: 0o600 });
   if (saved !== null && realpathSync(location) !== resolved) throw new Error('runtime mismatch');
   return { repo, runtime: resolved };

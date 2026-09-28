@@ -15,6 +15,7 @@ import { minimalEnv } from './commands.js';
 import { reservedPaths } from './schema.js';
 import { packageRoot } from './profiles.js';
 import { canonical, errorText, hash, identity, privateWrite, processState, redact, sleep } from './util.js';
+import type { ProcessIdentity } from './util.js';
 
 type Client = ReturnType<typeof createOpencodeClient>;
 const metadataSchema = z.object({ baseUrl: z.string().regex(/^http:\/\/127\.0\.0\.1:\d+$/), secretFile: z.string(), pid: z.number().int().positive(), start: z.string().nullable(), model: z.object({ providerID: z.string(), modelID: z.string() }), agent: z.literal('harness_worker'), steps: z.number().int().positive() });
@@ -100,12 +101,13 @@ export class OpenCodeRuntime implements WorkerRuntime {
     if (!input.policy.approvedPlugins.length) args.push('--pure');
     if (input.policy.sandbox) { args = [...input.policy.sandbox.args, executable, ...args]; executable = input.policy.sandbox.executable; }
     const child = spawn(executable, args, { cwd: directory, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }); this.children.set(input.id, child);
+    const spawnedIdentity = child.pid ? identity(child.pid) : null;
     const exited = new Promise<void>(resolve => { child.once('exit', () => resolve()); child.once('error', () => resolve()); });
     let output = ''; const collect = (chunk: Buffer): void => { output = (output + chunk.toString()).slice(-64_000); };
     child.stdout?.on('data', collect); child.stderr?.on('data', collect);
     try {
       await Promise.race([once(child, 'spawn'), exited.then(() => { throw new Error('owned OpenCode process failed to start'); })]);
-      const process = identity(child.pid!); privateWrite(processFile, { state: 'running', directory, baseUrl, ...process });
+      const process = spawnedIdentity ?? identity(child.pid!); privateWrite(processFile, { state: 'running', directory, baseUrl, ...process });
       const client = createOpencodeClient({ baseUrl, directory, headers: { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}` } });
       this.clients.set(input.id, client);
       let healthy = false;
@@ -147,7 +149,7 @@ export class OpenCodeRuntime implements WorkerRuntime {
       privateWrite(join(serverDirectory, 'effective-summary.json'), { version: '1.18.33', model, role: input.task.role, steps: agent.steps, permissionHash: hash(agent.permission), plugins, session: session.id, directory });
       privateWrite(join(serverDirectory, 'handle.json'), handle); return handle;
     } catch (error) {
-      if (child.pid) await this.terminate(child.pid, child, exited);
+      if (spawnedIdentity) await this.terminate(spawnedIdentity, child, exited);
       const stopped = !child.pid || child.exitCode !== null || child.signalCode !== null || processState(identity(child.pid)) === 'dead';
       privateWrite(processFile, { state: stopped ? 'stopped-after-start-failure' : 'uncertain', stopped, directory, pid: child.pid ?? null, error: redact(errorText(error), [password, input.token]), output: redact(output, [password, input.token]) });
       if (stopped) this.children.delete(input.id);
@@ -176,7 +178,7 @@ export class OpenCodeRuntime implements WorkerRuntime {
       if (!record.pid || record.start === undefined) return { state: 'uncertain' };
       const expected = { pid: record.pid, start: record.start }, state = processState(expected);
       if (state === 'dead') return { state: 'stopped' };
-      if (state === 'alive') { await this.terminate(record.pid); return { state: processState(expected) === 'dead' ? 'stopped' : 'uncertain' }; }
+      if (state === 'alive') { await this.terminate(expected); return { state: processState(expected) === 'dead' ? 'stopped' : 'uncertain' }; }
     } catch { /* Missing/truncated identity is not proof of termination. */ }
     return { state: 'uncertain' };
   }
@@ -223,9 +225,9 @@ export class OpenCodeRuntime implements WorkerRuntime {
       }
     } finally { this.observations.delete(handle.id); }
   }
-  private async terminate(pid: number, child?: ChildProcess, exited?: Promise<void>): Promise<void> {
-    const expected = identity(pid);
-    const kill = (signal: NodeJS.Signals): void => { try { if (process.platform !== 'win32') process.kill(-pid, signal); else if (child) child.kill(signal); else process.kill(pid, signal); } catch { /* process already exited */ } };
+  private async terminate(expected: ProcessIdentity, child?: ChildProcess, exited?: Promise<void>): Promise<void> {
+    if (processState(expected) !== 'alive') return;
+    const kill = (signal: NodeJS.Signals): void => { if (processState(expected) !== 'alive') return; try { if (process.platform !== 'win32') process.kill(-expected.pid, signal); else if (child) child.kill(signal); else process.kill(expected.pid, signal); } catch { /* process already exited */ } };
     kill('SIGTERM'); await Promise.race([exited ?? sleep(300), sleep(1500)]); if (processState(expected) === 'alive') kill('SIGKILL');
     if (child && child.exitCode === null && child.signalCode === null) await Promise.race([once(child, 'exit'), sleep(1000)]);
   }
@@ -234,7 +236,7 @@ export class OpenCodeRuntime implements WorkerRuntime {
     const meta = metadataSchema.parse(handle.metadata), state = processState(meta);
     if (state === 'dead') return 'stopped'; if (state !== 'alive') return 'uncertain';
     try { await this.client(handle).session.abort({ directory: handle.directory, sessionID: handle.session }, { signal: AbortSignal.timeout(2000) }); } catch { /* still terminate owned process group */ }
-    await this.terminate(meta.pid, this.children.get(handle.id)); this.children.delete(handle.id); this.inFlight.delete(handle.session);
+    await this.terminate(meta, this.children.get(handle.id)); this.children.delete(handle.id); this.inFlight.delete(handle.session);
     privateWrite(join(this.runtimeDirectory, 'servers', handle.id, 'process.json'), { state: processState(meta) === 'dead' ? 'stopped' : 'uncertain', pid: meta.pid, start: meta.start });
     return processState(meta) === 'dead' ? 'stopped' : 'uncertain';
   }

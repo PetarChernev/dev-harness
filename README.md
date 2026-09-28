@@ -32,7 +32,7 @@ See [the operator runbook](docs/runbook.md) for the complete brief → draft →
 
 ```sh
 npm --prefix tools/harness run test:package
-npm --prefix tools/harness pack
+npm pack ./tools/harness
 # In another npm repository, install that local tarball:
 npm install --save-dev /absolute/path/to/local-first-dev-harness-0.1.0.tgz
 npx --no-install harness init --repo /absolute/path/to/target --profile generic-command

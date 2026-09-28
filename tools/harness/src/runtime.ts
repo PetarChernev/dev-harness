@@ -27,6 +27,7 @@ export class FakeRuntime implements WorkerRuntime {
   outcome: 'accepted' | 'rejected' | 'uncertain' = 'accepted';
   recordUncertain = true;
   healthy = true;
+  cancelOutcome: 'stopped' | 'uncertain' = 'stopped';
   async start(input: StartWorker): Promise<WorkerHandle> {
     const handle = { id: input.id, session: `session_${input.id}`, directory: input.directory, metadata: { fake: true } };
     this.sessions.set(handle.session, { handle, input, status: { state: 'idle' }, messages: [], stopped: false });
@@ -53,6 +54,6 @@ export class FakeRuntime implements WorkerRuntime {
   async status(h: WorkerHandle): Promise<RuntimeStatus> { return this.sessions.get(h.session)?.status ?? { state: 'missing' }; }
   async messages(h: WorkerHandle): Promise<RuntimeMessage[]> { return this.sessions.get(h.session)?.messages ?? []; }
   async observe(_h: WorkerHandle, _notify: () => void, _signal: AbortSignal): Promise<void> { /* Poll reconciliation does not require events. */ }
-  async cancel(h: WorkerHandle): Promise<'stopped'> { const s = this.sessions.get(h.session); if (s) { s.stopped = true; s.status = { state: 'idle' }; } return 'stopped'; }
+  async cancel(h: WorkerHandle): Promise<'stopped' | 'uncertain'> { if (this.cancelOutcome === 'uncertain') return 'uncertain'; const s = this.sessions.get(h.session); if (s) { s.stopped = true; s.status = { state: 'idle' }; } return 'stopped'; }
   async health(): Promise<{ healthy: boolean; detail: string }> { return { healthy: this.healthy, detail: 'deterministic fake runtime' }; }
 }

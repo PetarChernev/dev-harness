@@ -10,6 +10,9 @@ import { canonical, git, sleep } from '../src/util.js';
 import { commandSchema, planSchema, validateGraph } from '../src/schema.js';
 import { generatePlan, reviewer } from '../src/llm-roles.js';
 import { packageRoot } from '../src/profiles.js';
+import { initProject, loadProject, writeProject } from '../src/profiles.js';
+import { openApplication } from '../src/application.js';
+import { FakeRuntime } from '../src/runtime.js';
 
 const close: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of close.splice(0)) await fn(); });
@@ -208,4 +211,46 @@ test('approved new revisions preserve attempt history while getting new scoped c
   expect(f.store.task('a').attempt).toBe(1); expect(f.store.task('a').workspace).not.toBe(old.workspace);
   expect(f.store.all('SELECT revision,number FROM attempts ORDER BY revision')).toEqual([{ revision: 1, number: 1 }, { revision: 2, number: 1 }]);
   expect(() => f.store.importPlan({ schemaVersion: 1, milestone: 'm', baseCommit: f.base, tasks: [spec('a', { revision: 3 })] })).toThrow('stop');
+});
+
+test('canonical runtime and backups cannot accidentally attach to another target repository', async () => {
+  const f = await setup(); const other = join(f.root, 'other'); mkdirSync(other); git(other, ['init', '-b', 'main']);
+  const { runtimeLocation } = await import('../src/util.js'); expect(() => runtimeLocation(other, f.runtime)).toThrow('another repository');
+  f.store.setMeta('repository', f.repo); const backup = join(f.root, 'bound.sqlite'); await f.store.backup(backup);
+  const destination = join(f.root, 'restore-bound'); mkdirSync(destination); const owner = new Ownership(destination);
+  try { expect(() => Store.restore(backup, join(destination, 'state.sqlite'), owner, other)).toThrow('not bound'); Store.restore(backup, join(destination, 'state.sqlite'), owner, f.repo); } finally { owner.close(); }
+});
+
+test('uncertain cancellation keeps the writer fenced and reserves capacity until explicit reconciliation', async () => {
+  const f = await fixture(1); close.push(() => f.cleanup()); f.approve([spec('a'), spec('b')]); await f.supervisor.tick(); const worker = f.store.worker(f.store.task('a').worker!);
+  f.runtimeAdapter.cancelOutcome = 'uncertain'; await f.supervisor.control('cancel', { task: 'a' }); await f.supervisor.tick();
+  expect(f.store.task('a').state).toBe('needs_human'); expect(f.store.task('b').state).toBe('ready'); expect(f.runtimeAdapter.prompts).toHaveLength(1);
+  await expect(f.supervisor.control('retry', { task: 'a', reason: 'not sufficient while ownership unknown' })).rejects.toThrow('prior owners');
+  f.runtimeAdapter.cancelOutcome = 'stopped'; await f.supervisor.control('reconcile-worker', { worker: worker.id, reason: 'confirmed stopped' });
+  expect(f.store.worker(worker.id).status).toBe('stopped');
+});
+
+test('versioned plan commits remain ancestors of integrated results so explicit promotion works across milestones', async () => {
+  const f = await setup(), repo = join(f.root, 'promotion-workflow'); initProject(repo, 'generic-command');
+  const policy = loadProject(repo);
+  policy.commands.check = commandSchema.parse({ executable: process.execPath, args: ['-e', 'const fs=require("fs");for(const p of ["a.txt","b.txt"])if(fs.existsSync(p)&&fs.readFileSync(p,"utf8")!=="complete")process.exit(1)'] });
+  writeProject(join(repo, '.harness/project.yaml'), policy); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'policy baseline']); const baseline = git(repo, ['rev-parse', 'HEAD']);
+  const app = openApplication(repo, new FakeRuntime());
+  try {
+    mkdirSync(join(repo, '.harness/plans'));
+    for (const name of ['a', 'b']) {
+      const baseCommit = git(repo, ['rev-parse', 'HEAD']), milestone = `milestone_${name}`;
+      const plan = { schemaVersion: 1, milestone, baseCommit, tasks: [spec(name, { milestone, verification: ['check'], artifacts: [`${name}.txt`] })] };
+      const file = join(repo, '.harness/plans', `${name}.json`); writeFileSync(file, JSON.stringify(plan)); git(repo, ['add', file]); git(repo, ['commit', '-m', `approveable plan ${name}`]);
+      const approvedHead = git(repo, ['rev-parse', 'HEAD']); await app.operate('import', { file }); await app.operate('approve', { milestone });
+      const workspace = app.supervisor.workspaces.create(name, baseCommit, 1), change = commit(workspace, `${name}.txt`, 'complete');
+      app.store.updateTask(name, { state: 'submitted', workspace, submission: canonical({ revision: 1, commit: change, changes: [`${name}.txt`], evidence: ['verified artifact'], limitations: [] }) });
+      expect(await app.verifier.verify(name)).toBe(true); expect(await app.integrator.integrate(name)).toBe(true);
+      app.supervisor.workspaces.ancestor(approvedHead, git(repo, ['rev-parse', 'harness/integration']));
+      expect(git(repo, ['rev-parse', 'HEAD'])).toBe(approvedHead);
+      await app.operate('promote', { target: 'main' }); expect(readFileSync(join(repo, `${name}.txt`), 'utf8')).toBe('complete');
+    }
+    git(repo, ['update-ref', 'refs/heads/harness/integration', baseline]);
+    await expect(app.operate('promote', { target: 'main' })).rejects.toThrow();
+  } finally { await app.close(); }
 });

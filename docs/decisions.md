@@ -31,3 +31,7 @@ Approved worker checks and independent/combined verification share command-level
 ## ADR-007 — Neutral starter and rendering gate (accepted)
 
 Pure Rust project_core uses seeded integer motion and explicit ticks. Desktop and headless call the same core. Default Cargo members exclude desktop. Bevy/Rust are pinned at 0.19.1/1.95.0; default features are disabled, no audio/assets/nightly optimizations are selected. Baseline replay tests and sample inputs are protected policy material. Finite desktop smoke uses no-VSync to avoid local compositor throttling, preserves a screenshot, and compares its core digest with headless output.
+
+## ADR-008 — Approval baseline and repository identity (accepted)
+
+Task bases precede the commit recording their plan. Therefore approval captures the committed operator baseline separately; integration combines that approved baseline and the submitted change on the latest target before rerunning checks. This preserves plan/policy commits and makes explicit fast-forward promotion work without rewriting the user's checkout. Promotion requires recorded verified integration evidence. Canonical runtime directories and backups are bound to their repository; automatic relocation/cross-repository state adoption is deferred.

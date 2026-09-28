@@ -58,6 +58,7 @@ export async function readOnlyTurn(store: Store, service: StateService, runtime:
     if (registerTask) store.run('UPDATE workers SET status=? WHERE id=?', stopped === 'stopped' ? 'stopped' : 'uncertain', id);
     store.run("UPDATE actions SET status=? WHERE id=? AND status!='finished'", stopped === 'stopped' ? 'failed' : 'uncertain', action);
     if (registerTask) store.run("UPDATE dispatches SET status='cancelled' WHERE id=? AND status!='completed'", requestId);
+    if (stopped !== 'stopped') { store.run("UPDATE actions SET status='uncertain' WHERE id=?", action); throw new Error('read-only role process termination is uncertain; reconcile before accepting its result'); }
   }
 }
 export function reviewer(store: Store, service: StateService, runtime: WorkerRuntime) {

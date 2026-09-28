@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Ownership } from './ownership.js';
-import { planSchema, projectSchema, taskSchema, validateGraph } from './schema.js';
+import { planSchema, projectSchema, sha, taskSchema, validateGraph } from './schema.js';
 import type { Plan, Project, State, Submission, TaskSpec } from './schema.js';
 import { canonical, hash, uid } from './util.js';
 import type { WorkerHandle } from './runtime.js';
@@ -115,7 +115,7 @@ export class Store {
     });
     return plan;
   }
-  approve(milestone: string, policyInput: unknown): string {
+  approve(milestone: string, policyInput: unknown, integrationBase?: string): string {
     const policy = projectSchema.parse(policyInput), tasks = this.tasks().filter(t => t.milestone === milestone && t.state === 'draft');
     if (!tasks.length) throw new Error('no draft tasks in milestone');
     for (const task of tasks) {
@@ -126,24 +126,27 @@ export class Store {
       if (spec.kind === 'maintenance' && !policy.integration.reviewRole) throw new Error('maintenance requires independent semantic review');
     }
     const approval = uid('approval');
+    const approvedBase = sha.parse(integrationBase ?? tasks[0]!.baseCommit);
     this.transaction(() => {
-      this.run('INSERT INTO approvals VALUES (?,?,?,?,?,?)', approval, milestone, canonical({ tasks: tasks.map(t => this.spec(t)), bases: tasks.map(t => ({ id: t.id, commit: t.baseCommit })) }), canonical(policy), hash({ policy, tasks: tasks.map(t => this.spec(t)) }), Date.now());
+      this.run('INSERT INTO approvals VALUES (?,?,?,?,?,?)', approval, milestone, canonical({ tasks: tasks.map(t => this.spec(t)), bases: tasks.map(t => ({ id: t.id, commit: t.baseCommit })), integrationBase: approvedBase }), canonical(policy), hash({ policy, tasks: tasks.map(t => this.spec(t)), integrationBase: approvedBase }), Date.now());
+      this.setMeta(`integration-base:${approval}`, approvedBase);
       for (const task of tasks) this.updateTask(task.id, { approval, state: 'ready', blocker: null });
       this.setMeta(`milestone:${milestone}`, 'active');
-      this.event('approval', 'operator approved included immutable revisions, policy and finite limits', null, { milestone, approval });
+      this.event('approval', 'operator approved included immutable revisions, policy, integration baseline and finite limits', null, { milestone, approval, integrationBase: approvedBase });
     });
     return approval;
   }
   submission(task: TaskRow): Submission | null { return task.submission ? JSON.parse(task.submission) as Submission : null; }
   async backup(path: string): Promise<void> { this.mutate(); if (existsSync(path)) throw new Error('backup destination exists'); mkdirSync(dirname(path), { recursive: true }); closeSync(openSync(path, 'wx', 0o600)); await this.db.backup(path); this.event('backup', 'SQLite online backup completed', null, { path }); }
   close(): void { this.db.close(); }
-  static restore(source: string, destination: string, ownership: Ownership): void {
+  static restore(source: string, destination: string, ownership: Ownership, expectedRepo?: string): void {
     ownership.assert();
     const backup = new Database(source, { readonly: true, fileMustExist: true });
     try {
       if (backup.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('invalid backup');
       const version = backup.pragma('user_version', { simple: true }) as number;
       if (version < 1 || version > migrations.length || !backup.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='specs'").get()) throw new Error('unsupported or non-harness backup schema');
+      if (expectedRepo) { const bound = backup.prepare("SELECT value FROM meta WHERE key='repository'").get() as { value: string } | undefined; if (!bound || JSON.parse(bound.value) !== expectedRepo) throw new Error('backup is not bound to this repository; inspect/migrate it before restore'); }
     } finally { backup.close(); }
     if (existsSync(destination) || existsSync(destination + '-wal')) throw new Error('restore requires absent destination; archive old database with supervisor stopped');
     const temporary = join(dirname(destination), uid('restore')); copyFileSync(source, temporary); renameSync(temporary, destination);

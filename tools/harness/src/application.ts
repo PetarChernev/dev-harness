@@ -45,6 +45,9 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
   const { repo, runtime } = runtimeLocation(repoInput, explicitRuntime), policy = loadProject(repo), ownership = new Ownership(runtime);
   let store: Store;
   try { store = new Store(join(runtime, 'state.sqlite'), ownership); } catch (error) { ownership.close(); throw error; }
+  const boundRepo = store.meta<string | null>('repository', null);
+  if (boundRepo !== null && boundRepo !== repo) { store.close(); ownership.close(); throw new Error('state database belongs to another repository; cross-repository restore/relocation requires an explicit migration'); }
+  if (boundRepo === null) store.setMeta('repository', repo);
   const workspaces = new Workspaces(repo, runtime), service = new StateService(store, workspaces), runner = new CommandRunner(store, runtime, policy);
   service.runner = runner;
   const verifier = new Verifier(store, workspaces, runner, reviewer(store, service, runtimeAdapter)), integrator = new Integrator(store, workspaces, verifier), supervisor = new Supervisor(store, service, workspaces, runtimeAdapter, policy, verifier, integrator);
@@ -70,11 +73,12 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
         const committedPlan = parse(git(repo, ['show', `HEAD:${relative}`]));
         const { planSchema } = await import('./schema.js');
         if (hash(planSchema.parse(committedPlan)) !== source.hash) throw new Error('commit exact imported plan before approval');
-        for (const task of store.tasks().filter(t => t.milestone === milestone)) {
+        for (const task of store.tasks().filter(t => t.milestone === milestone && t.state === 'draft')) {
           workspaces.commit(task.baseCommit);
+          workspaces.ancestor(task.baseCommit, workspaces.commit('HEAD'));
           const decision = store.spec(task).decisionRecord; if (decision) git(repo, ['show', `${task.baseCommit}:${decision}`]);
         }
-        const approval = store.approve(milestone, committed);
+        const approval = store.approve(milestone, committed, workspaces.commit('HEAD'));
         return { approval, defaults: committed.defaults, resources: committed.resources, approved: store.tasks().filter(t => t.approval === approval).map(t => ({ id: t.id, revision: t.revision, limits: store.spec(t).limits })) };
       }
       case 'answer': return service.answer(input);
@@ -103,7 +107,13 @@ export function openApplication(repoInput: string, runtimeAdapter: WorkerRuntime
         if (supervised) throw new Error('automatic pipeline owns verification/integration; stop supervisor before manual maintenance');
         const { task } = z.object({ task: z.string() }).strict().parse(input); return { passed: await (action === 'verify' ? verifier.verify(task) : integrator.integrate(task)) };
       }
-      case 'promote': { if (supervised) throw new Error('stop before promotion'); const { target } = z.object({ target: z.string() }).strict().parse(input); workspaces.promote(policy, target); store.event('promotion', 'operator explicitly promoted verified branch', null, { target }); return { target }; }
+      case 'promote': {
+        if (supervised) throw new Error('stop before promotion');
+        const { target } = z.object({ target: z.string() }).strict().parse(input), candidate = workspaces.commit(policy.integration.branch);
+        const record = store.get<{ task: string; revision: number }>("SELECT task,revision FROM integrations WHERE candidate=? AND state='advanced' ORDER BY created DESC LIMIT 1", candidate);
+        if (!record || store.task(record.task).state !== 'done' || store.task(record.task).revision !== record.revision) throw new Error('promotion requires a recorded verified integration for the current revision');
+        workspaces.promote(policy, target); store.event('promotion', 'operator explicitly promoted recorded verified branch', null, { target, candidate }); return { target, candidate };
+      }
       case 'backup': { const { file } = z.object({ file: z.string() }).strict().parse(input); await store.backup(file); return { backup: file }; }
       case 'resolve-action': {
         const { id, reason } = z.object({ id: z.string(), reason: z.string().min(1) }).strict().parse(input);

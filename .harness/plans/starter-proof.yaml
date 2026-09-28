@@ -1,0 +1,30 @@
+# Example draft. Import and explicit operator approval are required before execution.
+schemaVersion: 1
+milestone: starter-proof
+baseCommit: 34c11ae3e35899142c5905516c61b7b1fab035d6
+tasks:
+  - id: starter-proof
+    revision: 1
+    milestone: starter-proof
+    kind: research
+    objective: Record reproducible evidence for the existing neutral starter in reports/starter-proof.md. Do not change application behavior, tests, dependencies, policies or harness code. Run the approved checks through harness_check and record real results and limitations.
+    dependencies: []
+    role: researcher
+    editablePaths: [reports/starter-proof.md]
+    locks: []
+    acceptance:
+      - The report records a hypothesis, code revision, configuration/input hash, seed 42, 120 explicit ticks, exact commands, environment, observed digest and limitations.
+      - Formatting, linting, core/baseline tests and headless smoke/replay pass against the immutable submitted candidate.
+      - The report distinguishes headless evidence from graphical evidence and makes no unsupported graphical or cross-platform determinism claim.
+    verification: [fmt, lint, core-test, headless-smoke, replay]
+    artifacts: [reports/starter-proof.md]
+    limits:
+      attempts: 2
+      prompts: 6
+      steps: 12
+      elapsedMs: 1200000
+      noProgress: 3
+      providerRetries: 1
+      sessionPrompts: 6
+      tokens: 200000
+      costUsd: 5

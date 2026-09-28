@@ -64,8 +64,8 @@ targeted(cli.command('plan').description('Bounded live read-only planner produce
 targeted(cli.command('permission').description('Operator answers one scoped permission; never automatic, never always')).requiredOption('--worker <id>', 'worker ID').requiredOption('--request <id>', 'permission request ID').requiredOption('--reply <action>', 'once or reject').action((opts: Options) => call(opts, 'permission', { worker: opts.worker, request: opts.request, reply: opts.reply }));
 targeted(cli.command('permissions').description('Inspect redacted pending requests scoped to an owned session')).requiredOption('--worker <id>', 'worker ID').action((opts: Options) => call(opts, 'permissions', { worker: opts.worker }));
 targeted(cli.command('restore').description('Restore a checked SQLite backup into absent state database; supervisor must be stopped')).requiredOption('--file <path>', 'backup source').action((opts: Options) => {
-  const { runtime } = runtimeLocation(opts.repo, opts.runtime), owner = new Ownership(runtime);
-  try { Store.restore(resolve(String(opts.file)), join(runtime, 'state.sqlite'), owner); print({ restored: true, mode: 'inspect/reconcile before resuming' }); } finally { owner.close(); }
+  const { repo, runtime } = runtimeLocation(opts.repo, opts.runtime), owner = new Ownership(runtime);
+  try { Store.restore(resolve(String(opts.file)), join(runtime, 'state.sqlite'), owner, repo); print({ restored: true, mode: 'inspect/reconcile before resuming' }); } finally { owner.close(); }
 });
 targeted(cli.command('run').description('Run owned OpenCode supervisor; explicit resume, finite wall-clock cap')).option('--max-ms <number>', 'supervisor wall-clock cap', '3600000').action(async (opts: Options) => {
   const { runtime } = runtimeLocation(opts.repo, opts.runtime), maximum = Number(opts.maxMs);

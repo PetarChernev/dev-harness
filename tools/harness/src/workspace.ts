@@ -8,6 +8,7 @@ export class Workspaces {
   constructor(readonly repo: string, readonly runtime: string) { mkdirSync(join(runtime, 'worktrees'), { recursive: true }); }
   commit(ref: string): string { return sha.parse(git(this.repo, ['rev-parse', '--verify', `${ref}^{commit}`])); }
   ancestor(parent: string, child: string): void { git(this.repo, ['merge-base', '--is-ancestor', sha.parse(parent), sha.parse(child)]); }
+  isAncestor(parent: string, child: string): boolean { try { this.ancestor(parent, child); return true; } catch { return false; } }
   create(task: string, base: string, attempt: number, revision = 1): string {
     sha.parse(base);
     const path = join(this.runtime, 'worktrees', `${task}-r${revision}-${attempt}`);

@@ -61,7 +61,7 @@ npm run harness -- mail --repo . --recipient operator
 npm run harness -- checkpoint --repo . --task starter-proof
 ```
 
-Status/logs are JSON with task/attempt/worker/session/state/blocker/next-action/evidence, consumption, limits and observed overages. Redirect a status response to an ignored artifact if you need a snapshot; it is not an editable source of task authority.
+Status/logs are JSON with task/attempt/worker/session/state/blocker/next-action/evidence, consumption, limits and observed overages. For machine parsing use the standalone executable or `npm --silent run harness -- ...` to suppress npm's own banner. Redirect a status response to an ignored artifact if you need a snapshot; it is not an editable source of task authority.
 
 The supervisor runs compiled modules from a recorded content hash. A worker's edits do not hot-reload the supervisor, policy or verifier. Stop all owned workers before a harness rebuild/upgrade and restart explicitly. Worktrees/branches start at recorded commits; dependency tasks use an explicit integrated base containing their completed dependencies. User checkout and branch are preserved.
 
@@ -165,7 +165,7 @@ npm run harness -- status --repo .
 # Reconcile recorded owners/external actions and only then resume/run.
 ```
 
-Restore acquires exclusive ownership, checks backup integrity/schema, rejects an existing destination, and atomically installs the checked database. The separate ownership registry is not restored as an active owner. Migration/backup/restore behavior is exercised in offline tests.
+Restore acquires exclusive ownership, checks backup integrity/schema/repository binding, rejects an existing destination, and atomically installs the checked database. Runtime directories cannot be shared accidentally between different Git repositories. Cross-repository restore or relocating absolute runtime/worktree paths requires an explicit offline migration; it is not automatic in v1. Legacy unbound backups must be inspected/migrated in their original stopped repository before using the bound restore path. The separate ownership registry is not restored as an active owner. Migration/backup/restore behavior is exercised in offline tests.
 
 ## 9. Checks, samples and portability
 
@@ -189,7 +189,7 @@ Demo paths must be new/empty. Both demos use production state/scheduler/mail/Git
 Standalone reuse:
 
 ```sh
-npm --prefix tools/harness pack
+npm pack ./tools/harness
 # In another repository with a local npm package.json:
 npm install --save-dev /absolute/path/to/local-first-dev-harness-0.1.0.tgz
 npx --no-install harness init --repo /absolute/path/to/target --profile generic-command

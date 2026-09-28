@@ -166,7 +166,7 @@ export class Supervisor {
     }
   }
   private dependencies(task: TaskRow): boolean { return this.store.spec(task).dependencies.every(d => { const row = this.store.task(d.id); return row.revision === d.revision && row.state === 'done'; }); }
-  private activeCount(): number { return this.store.tasks().filter(t => t.state === 'running' || t.state === 'submitted').length + this.store.all<WorkerRow>("SELECT * FROM workers WHERE readOnly=1 AND status='active'").length; }
+  private activeCount(): number { return this.store.tasks().filter(t => t.state === 'running' || t.state === 'submitted').length + this.store.all<WorkerRow>("SELECT * FROM workers WHERE (readOnly=1 AND status IN ('active','uncertain')) OR (readOnly=0 AND status='uncertain')").length; }
   private async claim(task: TaskRow, readOnly = false): Promise<WorkerRow | null> {
     const spec = this.store.spec(task), now = Date.now();
     if (!readOnly && task.attempt >= spec.limits.attempts) { transition(this.store, task.id, 'needs_human', 'attempt budget exhausted'); return null; }

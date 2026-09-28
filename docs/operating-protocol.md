@@ -31,7 +31,7 @@ Each implementation owns a branch/worktree from its explicit base. Named locks c
 
 The writer is stopped before fresh-checkout verification. Commands come from the approved policy, use executable/argument arrays, have explicit environment/cwd/timeouts/logs/artifacts, and consume configurable compiler/graphical capacity. Tests execute project code on the host: this is trusted-local execution, not sandbox isolation.
 
-One integration intent records previous target, submitted commit and candidate. Merge into a detached checkout, rerun combined checks, record pass, then compare-and-swap the harness-owned branch. Restart recognizes already-created merge parents and already-advanced candidates. Failed checks never advance the target. The user's current checkout is preserved; promotion is explicit, fast-forward only, and never pushes.
+One integration intent records previous target, submitted commit and candidate. Approval also captures the committed operator baseline, including plan/policy commits made after the task's explicit base. Merge those approved heads into a detached candidate, rerun combined checks, record pass, then compare-and-swap the harness-owned branch. Restart recognizes already-created merge parents and already-advanced candidates. Failed checks never advance the target. The user's current checkout is preserved; promotion requires a recorded verified result, is explicit and fast-forward only, and never pushes.
 
 ## Recovery and guarantees
 

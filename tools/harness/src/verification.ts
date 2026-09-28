@@ -16,6 +16,7 @@ export class Verifier {
     try { return await this.checksWithinSlot(task, workspace, commands, semantic); } finally { release(); }
   }
   private async checksWithinSlot(task: TaskRow, workspace: string, commands: string[], semantic: boolean): Promise<boolean> {
+    if (this.store.get("SELECT id FROM workers WHERE readOnly=2 AND status='uncertain'")) throw new Error('verification capacity reserved for an unreconciled reviewer');
     const policy = this.store.policy(task);
     const commit = git(workspace, ['rev-parse', 'HEAD']);
     for (const command of [...new Set(commands)]) {
@@ -69,17 +70,19 @@ export class Integrator {
   }
   private async integrateOnce(taskId: string): Promise<boolean> {
     const task = this.store.task(taskId), submission = this.store.submission(task), policy = this.store.policy(task);
+    const approvedBase = this.store.meta(`integration-base:${task.approval}`, task.baseCommit);
     if (task.state !== 'integration' || !submission) throw new Error('task not independently verified');
     let attempt = this.store.get<IntegrationRow>("SELECT * FROM integrations WHERE task=? AND revision=? AND state IN ('prepared','created','checked','advanced') ORDER BY created DESC LIMIT 1", taskId, task.revision);
     if (!attempt) {
-      const previous = this.workspaces.integrationHead(policy, task.baseCommit), id = uid('integration');
+      const previous = this.workspaces.integrationHead(policy, approvedBase), id = uid('integration');
+      if (!this.workspaces.isAncestor(task.baseCommit, previous) && !this.workspaces.isAncestor(task.baseCommit, approvedBase)) throw new Error('submission base is outside approved integration history');
       const workspace = join(this.workspaces.runtime, 'worktrees', id);
       this.store.run('INSERT INTO integrations VALUES (?,?,?,?,?,?,?,?,?,?)', id, taskId, task.revision, submission.commit, previous, null, workspace, 'prepared', canonical([...new Set([...this.store.spec(task).verification, ...policy.integration.checks])]), Date.now());
       attempt = this.store.get<IntegrationRow>('SELECT * FROM integrations WHERE id=?', id)!;
       this.store.event('integration', 'serialized candidate intent recorded against latest target', taskId, { id, previous, submission: submission.commit });
     }
     if (attempt.submission !== submission.commit) throw new Error('integration belongs to different submission');
-    const target = this.workspaces.integrationHead(policy, task.baseCommit);
+    const target = this.workspaces.integrationHead(policy, approvedBase);
     if (attempt.candidate && target === attempt.candidate && ['checked', 'advanced'].includes(attempt.state)) {
       this.store.run("UPDATE integrations SET state='advanced' WHERE id=?", attempt.id);
       transition(this.store, taskId, 'done', 'reconciled already-advanced verified Git candidate');
@@ -93,11 +96,12 @@ export class Integrator {
       // A crash after Git merge but before recording its result: verify both parents, never merge twice.
       if (current !== attempt.previous) {
         const parents = git(attempt.workspace, ['show', '-s', '--format=%P', current]).split(' ');
-        if (parents[0] !== attempt.previous || !parents.includes(submission.commit)) { transition(this.store, taskId, 'needs_human', 'unrecognized Git result in interrupted integration'); return false; }
+        if (parents[0] !== attempt.previous || !parents.includes(submission.commit) || !this.workspaces.isAncestor(approvedBase, current)) { transition(this.store, taskId, 'needs_human', 'unrecognized Git result in interrupted integration'); return false; }
         attempt.candidate = current;
       } else {
         try {
-          git(attempt.workspace, ['merge', '--no-ff', '--no-edit', '-m', `Harness integrate ${task.id}@${task.revision} (${attempt.id})`, submission.commit]);
+          const heads = this.workspaces.isAncestor(approvedBase, attempt.previous) ? [submission.commit] : [approvedBase, submission.commit];
+          git(attempt.workspace, ['merge', '--no-ff', '--no-edit', '-m', `Harness integrate ${task.id}@${task.revision} (${attempt.id})`, ...heads]);
           attempt.candidate = git(attempt.workspace, ['rev-parse', 'HEAD']);
         } catch (error) {
           this.store.evidence(task, 'conflict', { workspace: attempt.workspace, error: errorText(error), status: git(attempt.workspace, ['status', '--porcelain']) });
