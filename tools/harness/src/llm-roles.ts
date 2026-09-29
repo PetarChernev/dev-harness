@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { stringify } from 'yaml';
 import { z } from 'zod';
-import { planSchema, taskSchema, validateGraph } from './schema.js';
+import { limitsSchema, planSchema, taskSchema, validateGraph } from './schema.js';
 import type { Project, TaskSpec } from './schema.js';
 import type { StateService } from './service.js';
 import type { Store, TaskRow } from './store.js';
@@ -70,17 +70,37 @@ export function reviewer(store: Store, service: StateService, runtime: WorkerRun
     return { ...z.object({ passed: z.boolean(), findings: z.array(z.string()) }).strict().parse(result.output), session: result.session };
   };
 }
+/** The model and the validator must agree on project-specific maxima and omitted-field defaults. */
+export function plannerPlanSchema(policy: Project) {
+  const shape = { ...limitsSchema.shape };
+  for (const key of Object.keys(shape) as (keyof typeof shape)[]) {
+    const maximum = policy.defaults[key];
+    shape[key] = shape[key].unwrap().max(maximum, {
+      error: issue => `requested ${issue.input}; project maximum for ${key} is ${maximum}`,
+    }).default(maximum);
+  }
+  const task = taskSchema.safeExtend({ limits: limitsSchema.extend(shape) });
+  return planSchema.extend({ tasks: z.array(task).min(1) });
+}
 export async function generatePlan(store: Store, service: StateService, workspaces: Workspaces, runtime: WorkerRuntime, policy: Project, briefFile: string, outFile: string): Promise<unknown> {
   const role = policy.roles.planner; if (!role?.readOnly) throw new Error('configure a read-only planner role');
+  const output = resolve(outFile);
+  if (existsSync(output)) throw new Error(`plan output already exists: ${output}; use a new output path`);
+  const brief = readFileSync(resolve(briefFile), 'utf8'), schema = plannerPlanSchema(policy);
   const baseCommit = workspaces.commit('HEAD'), directory = workspaces.candidate(baseCommit, 'planner');
-  const task = taskSchema.parse({ id: 'planner', revision: 1, milestone: 'planning', kind: 'research', objective: 'Draft a bounded plan', role: 'planner', editablePaths: [], acceptance: ['Schema-valid draft graph'], verification: [Object.keys(policy.commands)[0] ?? 'check'], artifacts: ['plan.yaml'], limits: { ...policy.defaults, prompts: 1, steps: Math.min(policy.defaults.steps, 10), elapsedMs: 120_000 } });
+  const task = taskSchema.parse({ id: 'planner', revision: 1, milestone: 'planning', kind: 'research', objective: 'Draft a bounded plan', role: 'planner', editablePaths: [], acceptance: ['Schema-valid draft graph'], verification: [Object.keys(policy.commands)[0] ?? 'check'], artifacts: ['plan.yaml'], limits: { ...policy.defaults, prompts: 1, steps: Math.min(policy.defaults.steps, 10), elapsedMs: Math.min(policy.defaults.elapsedMs, 120_000) } });
   const result = await readOnlyTurn(store, service, runtime, policy, task, directory,
-    `Propose a small bounded dependency graph only for this brief: ${readFileSync(resolve(briefFile), 'utf8')}. Inspect relevant files without edits. Final answer MUST be JSON matching this schema: ${JSON.stringify(z.toJSONSchema(planSchema))}. baseCommit MUST be ${baseCommit}. Available approved role templates and command IDs: ${JSON.stringify(policy)}. Every task must include editablePaths, explicit acceptance and finite limits. Do not approve, import or execute implementation. No game/content scope unless in the brief.`);
-  const plan = planSchema.parse(result.output); validateGraph(plan);
+    `Propose a small bounded dependency graph only for this brief: ${brief}. Inspect relevant files without edits. Final answer MUST be JSON matching this project-constrained schema: ${JSON.stringify(z.toJSONSchema(schema))}. baseCommit MUST be ${baseCommit}. Available role templates, command IDs and project policy: ${JSON.stringify(policy)}. Every task must include editablePaths, explicit acceptance and finite limits. For each proposed task, use this limits object or LOWER values: ${JSON.stringify(policy.defaults)}. These values are per-field upper bounds for this draft, not suggestions. In particular, limits.steps means agent iterations PER PROMPT, not total work across the task; use limits.prompts for the number of turns. Your own read-only planning turn has a separate maximum of ${task.limits.steps} steps and ${task.limits.elapsedMs} milliseconds. Never increase project limits to make the draft fit. Do not approve, import or execute implementation. No game/content scope unless in the brief.`);
+  const validated = schema.safeParse(result.output);
+  if (!validated.success) {
+    const issues = validated.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`);
+    store.event('plan-rejected', 'planner output failed project-constrained schema validation', null, { session: result.session, issues });
+    throw new Error(`planner draft rejected: ${issues.join('; ')}. Proposal retained in planning session ${result.session}; no output file was written and no limits were raised.`);
+  }
+  const plan = validated.data; validateGraph(plan);
   if (plan.baseCommit !== baseCommit) throw new Error('planner changed base commit');
   for (const spec of plan.tasks) {
     if (!policy.roles[spec.role] || spec.verification.some(c => !policy.commands[c])) throw new Error('planner used unknown roles/commands');
-    for (const key of Object.keys(policy.defaults) as (keyof Project['defaults'])[]) if (spec.limits[key] > policy.defaults[key]) throw new Error(`planner exceeded approved planning envelope: ${key}`);
   }
-  writeFileSync(resolve(outFile), stringify(plan), { flag: 'wx' }); return { state: 'draft', output: resolve(outFile), session: result.session, approvalRequired: true, plan };
+  writeFileSync(output, stringify(plan), { flag: 'wx' }); return { state: 'draft', output, session: result.session, approvalRequired: true, plan };
 }

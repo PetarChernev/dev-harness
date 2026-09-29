@@ -14,7 +14,7 @@ Authority: [saved request](specification.md). Runtime task state will live in SQ
 - No blocker to generic offline implementation. Pinned local Node installed; Git identity already available.
 - No blocker to authorized bootstrap completion. Existing-model live mail/continuation/checks and actual permission rejection/resumption are validated.
 - Monetary price is unavailable for the configured provider; observed in-flight token overage is documented. This is not a hard billing cap.
-- Live planner/reviewer behavior, live crash fault injection, non-Linux operation and actual sandbox isolation remain unverified; offline contract/recovery tests cover their implemented program boundaries. CI definitions have not run remotely.
+- Bounded live planner generation was validated in the post-bootstrap fix below. Live reviewer semantic judgment, live crash fault injection, non-Linux operation and actual sandbox isolation remain unverified; offline contract/recovery tests cover their implemented program boundaries. CI definitions have not run remotely.
 
 ## Next concrete action
 
@@ -35,3 +35,12 @@ Bootstrap implementation is complete. For new supervised work, review `.harness/
 - Headless replay: `artifacts/replay/replay.json`, digest `a0e4a7d818ae130b1c9130a8c8d1635c5358ebd7f155c41853abf61084b247c9`.
 - Desktop: `artifacts/desktop/smoke.json`, screenshot `artifacts/desktop/frame-d1b62d78-67e2-417a-b03d-ea74b5d152b8.png`, same core digest. Final formatting, desktop/core/headless Clippy and four Rust tests passed.
 - Root runtime snapshot: stopped, one unapproved draft, no workers/mail/actions. Online backup: `.local/bootstrap-state.sqlite`. No owned OpenCode server processes found after the final probes.
+
+## Post-bootstrap fix — planner limits (2026-09-29)
+
+- Reported failure: the planner proposed `record-starter-proof` with `steps: 30` while the configured ceiling was 12. Its prompt advertised the generic schema maximum of 100, then a separate check rejected the result. Original proposal remains in runtime action `role_action_6cbb0663a045aef108406040`.
+- Fixed generation to derive both the model's JSON schema and result validation from the project's limit ceilings/defaults. Clarified that steps are per prompt; preserved task refinements, policy limits and one-turn planning bounds. Added useful rejection diagnostics and an existing-output check before any model call.
+- Verification: `npm run test:harness` passed **41 tests**, including four planner regression tests. The compiled CLI was rebuilt.
+- Re-ran the exact reported command successfully: `npm run harness -- plan --repo . --brief docs/briefs/starter-proof.md --out .harness/plans/proposed-proof.yaml`. The generated review draft uses `steps: 12`; no tasks were imported or approved by planning.
+- Live evidence: action `role_action_1999cd986aa2e5d08d6d1cf3`, session `ses_f1605a401ffeWkhjPnvJ7h9xXD`, 25,502 reported tokens, monetary usage unknown. Action finished and the recorded owned process was confirmed dead. Existing `starter-proof@1` remains unapproved with zero implementation attempts/prompts.
+- Corrected the runbook: this Rust/Bevy repository already has real commands, roles and resource policy. Generating another draft is optional when using the included starter-proof plan.

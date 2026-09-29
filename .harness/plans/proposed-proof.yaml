@@ -1,0 +1,91 @@
+schemaVersion: 1
+milestone: starter-proof
+baseCommit: 198b60516b3a9f200d857e8fa7b245bb52a73774
+tasks:
+  - id: record-starter-proof
+    revision: 1
+    milestone: starter-proof
+    kind: research
+    objective: Produce reports/starter-proof.md with reproducible evidence for the
+      existing neutral seeded-motion starter, without changing its
+      implementation or presentation. This is a single-node draft dependency
+      graph for operator review only; it does not authorize approval, import, or
+      execution.
+    dependencies: []
+    role: researcher
+    editablePaths:
+      - reports/starter-proof.md
+    locks: []
+    acceptance:
+      - The only versioned change is reports/starter-proof.md. Do not change
+        behavior, presentation, gameplay, content, dependencies, manifests,
+        lockfiles, permissions, tests, scripts, harness code, or protected
+        policy. Existing command-generated evidence remains runtime output, not
+        additional editable or committed deliverables.
+      - State the hypothesis that identical pinned build, configuration, seed
+        and inputs reproduce identical final state and state digest. Record the
+        actual tested code revision, its relationship to base commit
+        198b60516b3a9f200d857e8fa7b245bb52a73774, working-tree status, pinned
+        toolchain and lockfile identity. Distinguish report-only differences
+        from changes to executable inputs.
+      - Use the unchanged experiments/example.json, seed 42 and exactly 120
+        explicit simulation ticks. Record both emitted configurationHash and
+        inputHash, identify their source and hashing semantics from the existing
+        implementation, and record the observed results.stateDigest and final
+        state tick rather than predicted values.
+      - Record exact executable-and-argument arrays for fmt, lint, core-test,
+        headless-smoke and replay from the approved policy, together with
+        working directory, relevant non-secret environment, timeouts, exit
+        statuses and evidence references. Include the replay script's two
+        underlying cargo invocations with their resolved output paths, not
+        merely the node wrapper command.
+      - Record observed OS, architecture, Rust, Cargo and Node versions,
+        relevant pinned package versions, and effective CARGO_TARGET_DIR and
+        CARGO_BUILD_JOBS. Distinguish observed environment values from
+        repository-declared versions; report missing version evidence
+        explicitly.
+      - Run the existing five verification command IDs without modifying their
+        definitions. Preserve and reference command logs,
+        artifacts/headless.json, and the replay first.json, second.json and
+        replay.json at their actual runtime artifact locations. The report must
+        contain the essential observed hashes and digest so it remains
+        interpretable separately from those logs.
+      - "Establish replay identity using the existing replay assertions: equal
+        configuration hashes, state digests and complete final states, with
+        final tick 120. Inspect both generated records to confirm matching code
+        revision, input hash, seed 42 and ticks 120; compare the headless-smoke
+        digest with the replay digest for the same pinned executable inputs. Do
+        not require whole artifact byte equality because invocation and
+        output-path metadata can differ."
+      - Separate headless results from desktop evidence. Desktop build and
+        graphical smoke are not requested verification gates for this task. Mark
+        desktop rendering unverified in this experiment unless actual
+        attributable rendering evidence already exists and is explicitly
+        identified as historical evidence with its own revision and environment.
+        Headless success, source inspection and compilation alone must never be
+        described as a graphical pass.
+      - Document limitations, including no demonstrated cross-platform bitwise
+        determinism and no desktop rendering or wall-clock timing guarantee from
+        the state digest. If a command fails, required evidence is unavailable,
+        replay differs, or limits are exhausted, preserve the observed failure
+        and report the blocker without claiming proof, changing acceptance,
+        installing dependencies, or expanding scope.
+    verification:
+      - fmt
+      - lint
+      - core-test
+      - headless-smoke
+      - replay
+    artifacts:
+      - reports/starter-proof.md
+    limits:
+      attempts: 1
+      prompts: 4
+      steps: 12
+      elapsedMs: 1800000
+      noProgress: 2
+      providerRetries: 1
+      sessionPrompts: 4
+      tokens: 60000
+      costUsd: 2
+    allowDependencies: false

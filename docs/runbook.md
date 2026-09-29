@@ -19,20 +19,22 @@ The root application uses stable Rust 1.95.0 and Bevy 0.19.1. Default Cargo memb
 
 ## 2. Brief and draft
 
-Write a brief with the desired outcome and exclusions. Generate a **bounded live draft**:
+Write a brief with the desired outcome and exclusions. This repository already includes `.harness/plans/starter-proof.yaml`; to use that plan, proceed to section 3. Generating another plan is optional. To generate a **bounded live draft** from a new or revised brief:
 
 ```sh
 npm run harness -- plan --repo . \
   --brief docs/briefs/starter-proof.md --out .harness/plans/proposed-proof.yaml
 ```
 
-The planner has one read-only prompt, at most 10 steps/120 seconds, and no approval/integration tool. It emits a schema-valid draft, checks graph/model-independent references, and refuses to overwrite an existing output. It neither imports nor approves the plan. If live planning is unavailable, author a plan manually using `tools/harness/schemas/plan-v1.schema.json`; runtime Zod also validates normalized paths and graph/cross-field constraints.
+The planner has one read-only prompt, at most 10 steps/120 seconds (or lower configured limits), and no approval/integration tool. It receives a project-constrained schema: each proposed task's limit must be no greater than the corresponding value in `.harness/project.yaml`'s `defaults`. `steps` is the maximum agent iterations per prompt; `prompts` bounds the number of turns. Omitted limit fields use the configured project values. The returned draft is checked against that same schema and the task graph. Invalid proposals remain in runtime planning records, with diagnostics naming the field, requested value and allowed maximum. Existing output files are rejected before any model call. The command neither imports nor approves the plan. If live planning is unavailable, author a plan manually using `tools/harness/schemas/plan-v1.schema.json`; runtime Zod also validates normalized paths and graph/cross-field constraints.
 
 The included `.harness/plans/starter-proof.yaml` is a small **unapproved example**: record proof for the existing neutral starter. It adds no product scope. Review the concrete `baseCommit`, task revisions, dependencies, editable paths, shared-lock keys, acceptance, command IDs, artifacts and limits before using it.
 
 ## 3. Commit, import and approve a milestone
 
-Edit `.harness/project.yaml` to define actual executable commands and role/resource policy. The generic profile's example command must be replaced with a meaningful acceptance check. Role templates are planner, implementer, researcher and reviewer; the Rust profile adds core/presentation responsibilities as profile data.
+**This Rust/Bevy starter is already configured.** `.harness/project.yaml` defines real formatting, linting, core tests, headless smoke/replay and separate desktop build/smoke commands. It also defines the worker roles and resource limits; you do not need to fill in or replace a placeholder check for this repository.
+
+When initializing a different project with `generic-command`, replace that template's print-only example with checks that actually fail when the project's acceptance criteria are not met. Roles are instruction templates for planner, implementer, researcher and reviewer; this Rust profile also assigns core and presentation responsibilities. The scheduler uses those instructions and configured limits without requiring you to design its behavior yourself.
 
 Commit the reviewed policy, plan and any decision record using your existing Git identity. Then:
 
